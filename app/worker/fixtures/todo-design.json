@@ -1,0 +1,47 @@
+{
+  "scenario": "个人日常待办,桌面与手机均可快速记录",
+  "style": "清爽简洁,浅色背景,单一强调色",
+  "layout": {
+    "type": "single-column",
+    "description": "居中单列:标题、输入栏、任务列表、底部统计"
+  },
+  "colors": {
+    "background": "#F7F7F5",
+    "surface": "#FFFFFF",
+    "text": "#1F2328",
+    "textMuted": "#5B636E",
+    "primary": "#2F5BD3",
+    "onPrimary": "#FFFFFF",
+    "border": "#E2E4E8",
+    "danger": "#B42318",
+    "success": "#1E7F4F"
+  },
+  "typography": {
+    "fontFamily": "system-ui, -apple-system, \"Segoe UI\", sans-serif",
+    "scale": {
+      "h1": "28px",
+      "h2": "18px",
+      "body": "16px",
+      "small": "13px"
+    }
+  },
+  "spacing": [
+    4,
+    8,
+    12,
+    16,
+    24,
+    32
+  ],
+  "breakpoints": {
+    "mobile": 640,
+    "desktop": 1024
+  },
+  "states": [
+    "empty",
+    "completed",
+    "hover",
+    "focus",
+    "disabled"
+  ]
+}

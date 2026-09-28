@@ -1,0 +1,32 @@
+/* 由 Forge 设计方案自动生成(project 记忆 design_system)。调整设计请在需求中明确说明。 */
+:root {
+  --color-background: #F7F7F5;
+  --color-surface: #FFFFFF;
+  --color-text: #1F2328;
+  --color-text-muted: #5B636E;
+  --color-primary: #2F5BD3;
+  --color-on-primary: #FFFFFF;
+  --color-border: #E2E4E8;
+  --color-danger: #B42318;
+  --color-success: #1E7F4F;
+  --font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-h1: 28px;
+  --font-h2: 18px;
+  --font-body: 16px;
+  --font-small: 13px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --bp-mobile: 640px;
+  --bp-desktop: 1024px;
+}
+body {
+  margin: 0;
+  background: var(--color-background);
+  color: var(--color-text);
+  font-family: var(--font-family);
+  font-size: var(--font-body);
+}

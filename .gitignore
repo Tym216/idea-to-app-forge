@@ -1,0 +1,96 @@
+SUBMISSION.md
+DEMO-NOTES.md
+
+# Windows download metadata
+*:Zone.Identifier
+
+# Local agent/tool metadata
+.atoms/
+
+# Runtime uploads
+uploads/
+
+# One-off repair scripts
+repair-failed-task-once.mjs
+restore-preview-once.mjs
+
+# Dependencies
+node_modules/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+coverage/
+
+# Caches
+.cache/
+.parcel-cache/
+.vite/
+.turbo/
+.eslintcache
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime / temp files
+tmp/
+temp/
+*.tmp
+*.temp
+*.pid
+*.pid.lock
+
+# Local test / browser artifacts
+playwright-report/
+test-results/
+blob-report/
+screenshots/
+videos/
+traces/
+
+# Local browser / fixture experiments
+browser_fixture_check.mjs
+_pre_browser_debug_backup/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# WSL / Linux local files
+*~
+.nfs*
+
+# Local database files, if any
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+# Misc local credentials
+*.pem
+*.key
+*.crt
+
+# Do NOT ignore package lockfiles:
+# package-lock.json
+# pnpm-lock.yaml
+# yarn.lock

@@ -1,0 +1,5 @@
+allowBuilds:
+  '@metagptx/vite-plugin-source-locator': set this to true or false
+  '@swc/core': set this to true or false
+  esbuild: set this to true or false
+  simple-git-hooks: set this to true or false
