@@ -1,5 +1,7 @@
 import { config } from './config.js';
-import { assertExecutionActive, guardedSandbox } from './execution-control.js';
+import { applyChanges, reconcileChanges, validateChanges } from './apply-changes.js';
+import { recordToolCall, recordOperation } from './task-metrics.js';
+import { assertExecutionActive, guardedSandbox, isSupabaseError, rethrowExecutionControl } from './execution-control.js';
 import { logger } from './logger.js';
 import { chat, parseJson } from './llm.js';
 import { getSandboxProvider } from './sandbox/index.js';
@@ -25,17 +27,28 @@ import {
   listFeedback,
   savePlan,
   listFiles,
+  listChangeJournals,
+  ensureLease,
   saveSnapshot,
   updateProject,
   updateTask,
   upsertFile,
 } from './supabase.js';
 
-const defaultDeps = { chat, appendStep, updateTask, updateProject, upsertFile, deleteFile, savePlan, addMessage, getLatestPlanVersion };
+const defaultDeps = { chat, appendStep, updateTask, updateProject, upsertFile, deleteFile, savePlan, addMessage, getLatestPlanVersion, listFiles, listChangeJournals, checkLease: null };
 
 export const INSTALL_CMD = 'npm install --no-audit --no-fund';
 export const BUILD_CMD = `${INSTALL_CMD} && npm run build`;
 export const DEV_CMD = 'npm run dev';
+
+const FUSION_SPEC = `
+apply_changes（启用时）一次提交已确定的完整文件修改，可接构建：
+{"thought":"...","tool":"apply_changes","args":{"changes":[{"operation":"write","path":"src/App.tsx","content":"完整文件内容"}],"after":"build"}}
+- 只支持 write；不存在则创建，存在则完整替换。不支持 patch/create/rename/delete。
+- changes 按顺序执行，禁止重复路径；总文件数和大小由平台限制。
+- after 只允许 none/build（过渡字段）；首项失败后停止其余操作。
+- 构建成功后，仅本任务已明确的网页验证流程由 Worker 自动启动并验收。
+- 不要把尚需读取结果才能决定的修改强行合并。`;
 
 const TOOLS_SPEC = `可用工具(每次只输出一个 JSON 对象):
 {"thought":"...","tool":"read_file","args":{"path":"src/App.tsx","offset":0}}
@@ -63,7 +76,7 @@ ${VERIFY_SPEC}
 export async function runPlan(task, context, design, deps = defaultDeps) {
   await deps.updateTask(task.id, { phase: 'planning' });
   const plan = await generateStructured({
-    chat: deps.chat, system: PLAN_PROMPT, context, validate: validatePlan, taskId: task.id, code: 'PLAN_INVALID',
+    chat: deps.chat, system: PLAN_PROMPT, context, validate: validatePlan, taskId: task.id, code: 'PLAN_INVALID', purpose: 'plan', contextParts: task.contextParts,
   });
   const saved = await deps.savePlan(task, 'plan', { ...plan, designLayout: design?.layout?.type });
   await deps.appendStep(task, { tool: 'plan', phase: 'awaiting_review', observation: `计划 v${saved.version} 已生成,等待你审阅` });
@@ -83,6 +96,7 @@ export function previousVerificationFailure(task) {
 }
 
 async function buildContext(task, project, files, memories) {
+  const memoryText = renderMemories(memories);
   const codeDigest = files.length
     ? files
         .map((f) => `--- ${f.path} ---\n${f.content.slice(0, 4000)}`)
@@ -90,11 +104,12 @@ async function buildContext(task, project, files, memories) {
         .slice(0, 60000)
     : '(空项目,尚未生成任何业务代码)';
 
+  task.contextParts = { memory: memoryText.length, initial_code: codeDigest.length };
   return [
     `项目名称: ${project.name}`,
     `项目已确认需求: ${project.description || '(暂无)'}`,
     '',
-    renderMemories(memories),
+    memoryText,
     '',
     '当前已有代码:',
     codeDigest,
@@ -129,11 +144,51 @@ async function runTool(ctx, tool, args) {
         };
       }
     }
-    case 'write_file': {
-      await sandbox.writeFile(sandboxId, args.path, args.content ?? '');
-      await ctx.deps.upsertFile(task, args.path, args.content ?? '');
-      progress.invalidate();
-      return { observation: `已写入 ${args.path}(${(args.content ?? '').length} 字符)`, ok: true };
+    case 'write_file':
+    case 'apply_changes': {
+      if (tool === 'apply_changes' && !ctx.fusionEnabled) return { observation: 'Action Fusion 未启用，请使用单文件工具。', ok: false };
+      const input = tool === 'write_file' ? { changes: [{ operation: 'write', path: args.path, content: args.content ?? '' }], after: 'none' } : args;
+      const { changes, after } = validateChanges(input, { maxFiles: config.fusionMaxFiles, maxBytes: config.fusionMaxBytes });
+      const extra = changes.length - 1 + (after === 'build' ? 1 : 0);
+      if (task.tool_steps + extra > config.maxToolSteps) throw new AgentStopError('TOOL_STEP_LIMIT', '预算不足以执行这组修改；尚未写入任何文件');
+      let result;
+      try { result = await applyChanges({ task, sandbox, sandboxId, changes, deps: ctx.deps,
+        invalidate: () => progress.invalidate(),
+        beforeWrite: async (index, filePath) => {
+          assertExecutionActive();
+          if (index > 0) consumeStep(ctx);
+          task.current_tool = { tool: 'write_file', path: filePath, started: performance.now() };
+          applyToolResult(task.plan, 'write_file', true);
+          markRunning(task.plan, 'write_file');
+          recordOperation('write_file');
+          if (tool === 'apply_changes') await ctx.deps.appendStep(task, { tool: 'write_file', event: 'started', phase: 'write_file', path: filePath, observation: `正在写入 ${filePath}` });
+        },
+        onWriteSuccess: async (_index, change) => {
+          applyToolResult(task.plan, 'write_file', true);
+          if (tool === 'apply_changes') await ctx.deps.appendStep(task, { tool: 'write_file', event: 'finished', phase: 'write_file', path: change.path,
+            ok: true, ms: Math.round(Math.max(0, performance.now() - task.current_tool.started)), observation: `已写入 ${change.path}（${change.content.length} 字符）` });
+        },
+      }); } catch (error) {
+        if (after === 'build' && error.operations) error.operations.push({ kind: 'build', status: 'not_run' });
+        throw error;
+      }
+      if (after === 'build') {
+        let built;
+        try { built = await executeOperation(ctx, 'build', {}, true); }
+        catch (error) {
+          error.operations = [...result.operations, { kind: 'build', status: error.code === 'TOOL_STEP_LIMIT' ? 'not_run' : 'failed' }];
+          throw error;
+        }
+        result.operations.push({ index: changes.length, kind: 'build', status: built.ok ? 'succeeded' : 'failed' });
+        if (!built.ok) return { observation: JSON.stringify({ ...result, status: 'partial' }) + '\n' + built.observation, ok: false };
+        let validation;
+        try { validation = await advanceValidation(ctx); }
+        catch (error) { error.operations = [...result.operations, ...(error.operations || [])]; throw error; }
+        result.operations.push(...(validation.operations || []));
+        if (!validation.ok) return { observation: JSON.stringify({ ...result, status: 'partial' }) + '\n' + validation.observation, ok: false };
+        return { observation: JSON.stringify(result) + '\n' + validation.observation, ok: true };
+      }
+      return { observation: JSON.stringify(result), ok: true };
     }
     case 'delete_file': {
       await sandbox.exec(sandboxId, `rm -f ${JSON.stringify(args.path)}`, { timeoutMs: 20000 });
@@ -158,7 +213,7 @@ async function runTool(ctx, tool, args) {
         await ctx.deps.updateTask(task.id, { fix_rounds: task.fix_rounds, phase: 'fixing' });
         observation += `\n\n构建失败,请分析错误并修复(第 ${task.fix_rounds}/${config.maxFixRounds} 轮修复)。`;
       } else {
-        observation += '\n\n构建成功,下一步请 start_dev。';
+        observation += '\n\n构建成功。';
       }
       return { observation, ok };
     }
@@ -218,20 +273,25 @@ async function runTool(ctx, tool, args) {
  * - 总工具步数上限 config.maxToolSteps
  * - 构建修复轮数上限 config.maxFixRounds(二者分别配置)
  */
-export async function runBuild(task, project, sandbox, sandboxId, context, deps = defaultDeps, designPrompt = '', acceptance = []) {
+export async function runBuild(task, project, sandbox, sandboxId, context, deps = defaultDeps, designPrompt = '', acceptance = [], options = {}) {
   requireVerificationBudget(task);
   let canonicalAcceptance;
   try { canonicalAcceptance = validateAcceptance(acceptance); }
   catch (error) { throw new AgentStopError('PLAN_REVISION_REQUIRED', `验收检查缺失或无效,请创建新 Plan 并审阅: ${error.message}`); }
+  const fusionEnabled = options.fusionEnabled ?? config.actionFusionEnabled;
+  const runtimePolicy = options.runtimePolicy ?? { workflow: 'manual', afterBuildSuccess: [] };
   const history = [
     {
       role: 'system',
-      content: `你是一个在隔离沙箱中工作的编码代理,用 ReAct 模式逐步完成任务。\n${TOOLS_SPEC}${designPrompt ? `\n\n${designPrompt}` : ''}`,
+      content: `你是一个在隔离沙箱中工作的编码代理,用 ReAct 模式逐步完成任务。\n${TOOLS_SPEC}${fusionEnabled ? `\n${FUSION_SPEC}` : ''}${designPrompt ? `\n\n${designPrompt}` : ''}`,
     },
     { role: 'user', content: context },
   ];
   const progress = new BuildProgress({ maxFixRounds: config.maxFixRounds, fixRounds: task.fix_rounds || 0 });
-  const ctx = { task, sandbox, sandboxId, progress, previewUrl: '', deps, acceptance: canonicalAcceptance, verificationResult: null };
+  const ctx = { task, sandbox, sandboxId, progress, previewUrl: '',
+    deps: { ...deps, checkLease: deps.checkLease || (() => ensureLease(task.id)) },
+    acceptance: canonicalAcceptance, verificationResult: null, fusionEnabled, runtimePolicy };
+
 
   const stages = Array.isArray(task.plan) && task.plan.length && task.plan[0]?.key ? task.plan : initialStages();
   task.plan = stages;
@@ -242,22 +302,41 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
     if (task.aborted) throw new AgentStopError('ABORTED', task.aborted);
     task.current_tool = null;
     await ctx.deps.updateTask(task.id, { phase: 'deciding' });
-    const raw = await ctx.deps.chat(history, { temperature: 0.1, json: true, taskId: task.id });
+    const raw = await ctx.deps.chat(history, { temperature: 0.1, json: true, taskId: task.id,
+      purpose: 'build_decision', contextParts: {
+        system: { plan_and_acceptance: options.planChars || 0, instructions: history[0].content.length - (options.planChars || 0) },
+        user: task.contextParts,
+      },
+    });
     let action;
+    let parsed = false;
     try {
       action = parseJson(raw);
-      if (!action || typeof action.tool !== 'string' || (action.args != null && (typeof action.args !== 'object' || Array.isArray(action.args)))) {
+      parsed = true;
+      if (!action || typeof action.tool !== 'string' || (action.args !== undefined && (!action.args || typeof action.args !== 'object' || Array.isArray(action.args)))) {
         throw new Error('工具调用需包含 tool 字符串和 args 对象');
+      }
+      const fields = { read_file: ['path'], write_file: ['path', 'content'], delete_file: ['path'],
+        run_command: ['command'], list_files: [], build: [], start_dev: [], verify: [], finish: [], request_plan_revision: [], apply_changes: [] };
+      if (!Object.hasOwn(fields, action.tool)) throw new Error('工具名称不在可用工具列表中');
+      for (const field of fields[action.tool]) {
+        if (typeof action.args?.[field] !== 'string' || (field !== 'content' && !action.args[field].trim())) {
+          throw new Error(`${action.tool} 缺少必需字符串字段 ${field}`);
+        }
+      }
+      if (action.tool === 'apply_changes') {
+        if (!fusionEnabled) throw new Error('apply_changes 未启用');
+        validateChanges(action.args, { maxFiles: config.fusionMaxFiles, maxBytes: config.fusionMaxBytes });
       }
     } catch (error) {
       task.tool_steps += 1;
       invalidResponses += 1;
       await ctx.deps.appendStep(task, {
         tool: 'llm_parse_error', phase: 'format_retry', ok: false,
-        observation: `模型输出格式无效(${invalidResponses}/3)，返回 ${raw.length} 字符；${invalidResponses === 3 ? '已停止，避免继续消耗' : '正在请求重新输出工具 JSON'}`,
+        observation: `模型输出格式无效(${invalidResponses}/2)，返回 ${raw.length} 字符；协议校验：${parsed ? redact(error.message, 300) : '无法解析 JSON（请检查原始 content 是否被截断）'}；${invalidResponses === 2 ? '已停止，避免继续消耗' : '正在请求重新输出工具 JSON'}`,
       });
-      if (invalidResponses >= 3) throw new AgentStopError('LLM_FORMAT_STALLED', '模型连续 3 次没有返回合法工具调用');
-      history.push({ role: 'user', content: '上一条输出无法解析为工具调用。请只返回一个合法 JSON 对象，包含 tool 和 args；字符串换行必须转义。' });
+      if (invalidResponses >= 2) throw new AgentStopError('LLM_FORMAT_STALLED', '模型输出经一次修正仍不是合法工具调用');
+      history.push({ role: 'user', content: `上一条工具调用协议无效：${parsed ? error.message : '无法解析 JSON，请检查引号、括号与转义'}。请只返回一个合法 JSON 对象，包含 tool 和 args；字符串换行必须转义。` });
       continue;
     }
     invalidResponses = 0;
@@ -266,6 +345,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
     task.tool_steps += 1;
     history.push({ role: 'assistant', content: JSON.stringify(action) });
     const { tool, args = {} } = action;
+    recordToolCall();
 
     if (tool === 'finish') {
       const blocked = progress.canFinish();
@@ -290,7 +370,12 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
     await ctx.deps.appendStep(task, { tool, phase: tool, event: 'started', path: activityPath, observation: '' });
     try {
       ({ observation, ok } = await withObservation(`tool.${tool}`, { metadata: { tool } }, 'tool', async (obs) => {
-        const r = await runTool(ctx, tool, args);
+        const r = await executeOperation(ctx, tool, args, false);
+        if (tool === 'build' && r.ok) {
+          const validation = await advanceValidation(ctx);
+          r.observation += '\n' + validation.observation;
+          r.ok = validation.ok;
+        }
         obs.update({
           ...(r.ok ? {} : { level: 'WARNING', statusMessage: redact(r.observation, 300) }),
           metadata: { tool, ok: r.ok, ms: Math.max(0, performance.now() - started) },
@@ -300,11 +385,14 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
       if (task.aborted) throw new AgentStopError('ABORTED', task.aborted);
     } catch (error) {
       assertExecutionActive();
-      if (error?.code === 'LEASE_LOST' || error?.code?.startsWith('SUPABASE_')) throw error;
+      if (error?.code === 'LEASE_LOST' || isSupabaseError(error)) throw error;
       if (error instanceof AgentStopError) {
-        applyToolResult(stages, tool, false, error.message.slice(0, 120));
+        // Automatic child failure must not relabel successful writes/build as failed.
+        if (task.current_tool?.tool === tool || error.code === 'CHANGE_UNCERTAIN') {
+          applyToolResult(stages, tool, false, error.message.slice(0, 120));
+        }
         await ctx.deps.appendStep(task, { tool, phase: 'stopped', event: 'finished', ok: false,
-          ms: Math.max(0, performance.now() - started), observation: error.message });
+          ms: Math.max(0, performance.now() - started), observation: error.message, ...(error.operations ? { result: { status: error.code === 'CHANGE_UNCERTAIN' ? 'uncertain' : 'partial', operations: error.operations } } : {}) });
         throw error;
       }
       observation = `工具执行失败: ${String(error).slice(0, 2000)}`;
@@ -327,7 +415,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
       fixRounds: task.fix_rounds,
       observation: observation.slice(0, 160),
     });
-    applyToolResult(stages, tool, ok, observation.slice(0, 120));
+    if (!['apply_changes', 'write_file'].includes(tool)) applyToolResult(stages, tool, ok, observation.slice(0, 120));
     await ctx.deps.appendStep(task, {
       tool, phase: !ok && ['build', 'verify'].includes(tool) && task.fix_rounds > 0 ? 'fixing' : tool,
       event: 'finished', path: activityPath,
@@ -341,17 +429,89 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
   throw new AgentStopError('TOOL_STEP_LIMIT', `已达到总工具步数上限 ${config.maxToolSteps},任务未完成。`);
 }
 
-/** 命令超时后先检查进程是否仍在运行,再决定是否重试,避免重复执行。 */
-async function runCommand(sandbox, sandboxId, command) {
+export function webValidationPolicy(plan, enabled) {
+  const acceptance = plan?.content?.acceptance;
+  return enabled && Array.isArray(acceptance) && acceptance.length && acceptance.some((item) => Array.isArray(item.steps) && item.steps.length)
+    ? { workflow: 'web_app', planVersion: plan.version, afterBuildSuccess: ['start_dev', 'verify'], verificationSource: 'saved_plan' }
+    : { workflow: 'manual', afterBuildSuccess: [] };
+}
+
+function consumeStep(ctx) {
+  if (ctx.task.tool_steps >= config.maxToolSteps) throw new AgentStopError('TOOL_STEP_LIMIT', '下一项操作前预算已耗尽，已有修改保留');
+  ctx.task.tool_steps++;
+}
+
+async function executeOperation(ctx, tool, args, automatic) {
+  assertExecutionActive();
+  await ctx.deps.checkLease();
+  if (automatic) consumeStep(ctx);
+  if (!['write_file', 'apply_changes'].includes(tool)) recordOperation(tool);
+  if (automatic) {
+    markRunning(ctx.task.plan, tool);
+    ctx.task.current_tool = { tool, started: performance.now() };
+    await ctx.deps.appendStep(ctx.task, { tool, phase: tool, event: 'started', automatic: true, observation: '' });
+  }
+  const started = performance.now();
+  try {
+    const result = automatic
+      ? await withObservation(`tool.${tool}`, { metadata: { tool, automatic: true } }, 'tool', async (obs) => {
+          const value = await runTool(ctx, tool, args);
+          obs.update({ metadata: { tool, automatic: true, ok: value.ok, ms: Math.round(Math.max(0, performance.now() - started)) } });
+          return value;
+        })
+      : await runTool(ctx, tool, args);
+    assertExecutionActive();
+    await ctx.deps.checkLease();
+    recordOperation(tool, result.ok);
+    if (!['write_file', 'apply_changes'].includes(tool)) {
+      applyToolResult(ctx.task.plan, tool, result.ok, result.observation.slice(0, 120));
+    }
+    if (automatic) {
+      await ctx.deps.appendStep(ctx.task, { tool, phase: tool, event: 'finished', automatic: true, ok: result.ok,
+        ms: Math.round(Math.max(0, performance.now() - started)), observation: result.observation.slice(0, 1500) });
+    }
+    return result;
+  } catch (error) {
+    if (automatic) {
+      applyToolResult(ctx.task.plan, tool, false, error.message.slice(0, 120));
+      try { await ctx.deps.appendStep(ctx.task, { tool, phase: 'stopped', event: 'finished', automatic: true, ok: false,
+        ms: Math.round(Math.max(0, performance.now() - started)), observation: error.message.slice(0, 1500) }); } catch {}
+    }
+    throw error;
+  }
+}
+
+async function advanceValidation(ctx) {
+  if (!ctx.fusionEnabled || ctx.runtimePolicy.workflow !== 'web_app'
+    || JSON.stringify(ctx.runtimePolicy.afterBuildSuccess) !== JSON.stringify(['start_dev', 'verify'])) return { ok: true, observation: '', operations: [] };
+  let start;
+  try {
+    start = await executeOperation(ctx, 'start_dev', {}, true);
+    if (!start.ok) throw new AgentStopError('START_FAILED', start.observation);
+  } catch (error) {
+    error.operations = [{ kind: 'start_dev', status: error.code === 'TOOL_STEP_LIMIT' ? 'not_run' : 'failed' }, { kind: 'verify', status: 'not_run' }];
+    throw error;
+  }
+  let checked;
+  try { checked = await executeOperation(ctx, 'verify', {}, true); }
+  catch (error) {
+    error.operations = [{ kind: 'start_dev', status: 'succeeded' }, { kind: 'verify', status: error.code === 'TOOL_STEP_LIMIT' ? 'not_run' : 'failed' }];
+    throw error;
+  }
+  return { ok: checked.ok, observation: start.observation + '\n' + checked.observation,
+    operations: [{ kind: 'start_dev', status: 'succeeded' }, { kind: 'verify', status: checked.ok ? 'succeeded' : 'failed' }] };
+}
+
+/** A missing process does not prove an operation was unapplied. Never blindly replay. */
+export async function runCommand(sandbox, sandboxId, command) {
   const result = await sandbox.exec(sandboxId, command);
   if (!result.timedOut) return result;
 
   const key = command.split(/\s+/).find((token) => token && !token.startsWith('-')) || command.slice(0, 12);
-  const stillRunning = await sandbox.checkProcess(sandboxId, key);
-  if (stillRunning) {
-    return { ...result, stdout: `命令仍在后台运行(超时但进程存在),未重复执行: ${command}` };
-  }
-  return sandbox.exec(sandboxId, command);
+  let stillRunning = null;
+  try { stillRunning = await sandbox.checkProcess(sandboxId, key); } catch (error) { rethrowExecutionControl(error); }
+  const detail = stillRunning === true ? '仍观察到相关进程' : stillRunning === false ? '未观察到相关进程，但无法确定命令结果' : '无法读取进程状态';
+  throw new AgentStopError('COMMAND_UNCERTAIN', `命令超时；${detail}。已停止且未重新执行，请先核对沙箱日志和操作结果`);
 }
 
 function formatResult(result) {
@@ -400,7 +560,7 @@ export async function resolveBuildBasis(task, context, deps) {
   }
   await deps.updateTask(task.id, { phase: 'action_planning' });
   const action = await generateStructured({
-    chat: deps.chat, system: ACTION_PROMPT, context, validate: validateAction, taskId: task.id, code: 'ACTION_INVALID',
+    chat: deps.chat, system: ACTION_PROMPT, context, validate: validateAction, taskId: task.id, code: 'ACTION_INVALID', purpose: 'action_plan', contextParts: task.contextParts,
   });
   const plan = await deps.savePlan(task, 'action', action);
   await deps.updateTask(task.id, { plan_id: plan.id, plan_version: plan.version });
@@ -415,7 +575,12 @@ export async function resolveBuildBasis(task, context, deps) {
 
 export async function executeTask(task) {
   if (task.mode === 'build') requireVerificationBudget(task);
-  const deps = { ...defaultDeps, getPlan, listFeedback };
+  const deps = { ...defaultDeps, getPlan, listFeedback, checkLease: () => ensureLease(task.id) };
+  // Reconcile against the ORIGINAL sandbox before hydration or spending more model tokens.
+  if (task.mode === 'build') {
+    await updateTask(task.id, { phase: 'reconciling' });
+    await reconcileChanges({ task, sandbox: guardedSandbox(getSandboxProvider('daytona')), deps });
+  }
   await updateTask(task.id, { phase: 'understand' });
   const project = await getProject(task.project_id, task.user_id);
   const files = await listFiles(task.project_id);
@@ -423,8 +588,9 @@ export async function executeTask(task) {
   const context = await buildContext(task, project, files, memories);
 
   await updateTask(task.id, { phase: 'designing' });
-  const { design, source } = await resolveDesign({ task, memories, context, deps: { chat, upsertMemory } });
-  await appendStep(task, { tool: 'design', phase: 'understand', observation: `设计方案(${source}): ${design.layout.type} · ${design.style}` });
+  const { design, source, warnings = [] } = await resolveDesign({ task, memories, context, deps: { chat, upsertMemory } });
+  await appendStep(task, { tool: 'design', phase: 'understand', warnings,
+    observation: `设计方案(${source}): ${design.layout.type} · ${design.style}${warnings.length ? '\n提示：' + warnings.join('；') : ''}` });
 
   if (task.mode === 'plan') {
     const previousPlan = task.plan_id
@@ -454,7 +620,8 @@ export async function executeTask(task) {
 
   await updateTask(task.id, { phase: 'react' });
   const { summary, previewUrl } = await runBuild(
-    task, project, sandbox, sandboxId, context, defaultDeps, `${basis.prompt}\n\n${renderDesignPrompt(design)}`, basis.acceptance
+    task, project, sandbox, sandboxId, context, deps, `${basis.prompt}\n\n${renderDesignPrompt(design)}`, basis.acceptance,
+    { planChars: basis.prompt.length, runtimePolicy: webValidationPolicy(basis.plan, config.actionFusionEnabled) }
   );
 
   await saveSnapshot(task, `task ${task.id}`);

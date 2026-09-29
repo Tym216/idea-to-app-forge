@@ -2,7 +2,8 @@ import { config, assertRunnable } from './config.js';
 import { logger } from './logger.js';
 // config.js 已先加载 .env,之后才初始化观测
 import { initTelemetry, traceTask, shutdownTelemetry } from './telemetry.js';
-import { withExecutionControl, monitorExecution } from './execution-control.js';
+import { withExecutionControl, monitorExecution, isSupabaseError } from './execution-control.js';
+import { createTaskMetrics, metricsSnapshot } from './task-metrics.js';
 // Supabase 客户端在模块导入时创建,需在配置校验通过后再动态加载
 let claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease, executeTask, admin, getSandboxProvider, processOneDeletion, processOnePreviewRecovery;
 
@@ -12,7 +13,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** 错误归类:简短原因 + 下一步操作(原始堆栈另存,前端折叠显示)。 */
 export function summarizeError(error, task) {
-  const code = error?.code || '';
+  const code = typeof error?.code === 'string' ? error.code : '';
   const last = task.current_tool;
   const lastInfo = last ? `最后执行 ${last.tool},已耗时 ${Math.round(Math.max(0, performance.now() - last.started) / 1000)} 秒` : '';
   const map = {
@@ -26,13 +27,16 @@ export function summarizeError(error, task) {
     PLAN_REVISION_REQUIRED: ['已批准的验收定义需要修订', '切换 Plan,描述需要调整的验收条件;审阅新版本后再批准构建。不要恢复旧任务'],
     PLAN_VERSION_STALE: ['任务绑定的计划已被新版本替代', '审阅并批准最新计划后构建。不要恢复旧任务'],
     AGENT_STALLED: ['同一操作反复失败,已停止', '补充更具体的需求后「新建任务」'],
+    CHANGE_UNCERTAIN: ['文件操作结果未确认，已停止后续执行', '恢复前自动核对原沙箱与数据库。若仍有版本冲突或原沙箱不可访问，请人工核对；不要直接重放写入'],
+    COMMAND_UNCERTAIN: ['命令超时，结果尚未确认；未自动重跑', '先核对沙箱进程、日志及操作结果，不要直接恢复并重复执行命令'],
+    START_FAILED: ['开发服务启动失败，已停止自动推进', '查看启动日志，修复环境后恢复任务；代码保留'],
     TOOL_STEP_LIMIT: ['达到最大工具步数仍未完成', '「恢复任务」继续,或拆分需求'],
     PLAN_NOT_APPROVED: ['计划尚未批准', '在计划面板审阅并批准'],
     DESIGN_INVALID: ['设计方案生成失败', '「新建任务」重试'],
     PLAN_INVALID: ['计划生成失败', '「新建任务」重试'],
     LLM_TIMEOUT: [String(error.message), '模型请求超时。检查模型服务状态后可「恢复任务」，已保存的代码会保留'],
     LLM_NETWORK: [String(error.message), '模型网络请求失败。检查 Worker 网络后可「恢复任务」，无需新建沙箱'],
-    LLM_FORMAT_STALLED: ['模型连续 3 次返回无效工具调用，已停止', '查看 Langfuse 的模型输出，检查输出长度或模型兼容性后再恢复'],
+    LLM_FORMAT_STALLED: ['模型工具调用经一次格式修正仍无效，已停止', '查看 Langfuse 的模型输出，检查输出长度或模型兼容性后再恢复'],
     SUPABASE_NETWORK: [String(error.message), '数据库连接异常，Worker 已停止继续领取任务。检查网络后重启 Worker，并核对任务状态'],
     SUPABASE_STATE: [String(error.message), '任务状态无法可靠保存，Worker 已停止。检查数据库迁移与权限后重启'],
   };
@@ -53,6 +57,9 @@ export function makeFailurePatch(error, task, summary = summarizeError(error, ta
 
 async function handleTask(task) {
   logger.info('task.claimed', { taskId: task.id, projectId: task.project_id, mode: task.mode, kind: task.kind });
+  const metrics = createTaskMetrics(task, { fusionEnabled: config.actionFusionEnabled, codeVersion: config.metricsCodeVersion });
+  let outcome = 'unconfirmed';
+  let outcomeError;
 
   setExecution(task.id, task.execution_id);
   const controller = new AbortController();
@@ -84,36 +91,46 @@ async function handleTask(task) {
   });
   // 每次执行一个新 trace;超时后旧执行在下一步以 ABORTED 抛出,根 observation 随之以 WARNING 结束
   let modelCall = (task.steps || []).filter((s) => s.tool === 'llm' && s.event === 'started').length;
-  const onModelEvent = async ({ event, model, ms, chars, usage }) => {
+  const onModelEvent = async ({ event, model, ms, chars, usage, attempt, delayMs, reason }) => {
     if (event === 'started') modelCall++;
     const tokens = usage ? `；输入 ${usage.input ?? '未返回'} / 输出 ${usage.output ?? '未返回'} tokens` : '';
+    if (event === 'retrying') {
+      await appendStep(task, { tool: 'llm', event, phase: 'llm_retry',
+        observation: `第 ${modelCall} 次模型调用遇到 ${reason}；等待 ${delayMs}ms 后进行第 ${attempt} 次供应商请求（最多两次）` });
+      return;
+    }
     await appendStep(task, { tool: 'llm', event, phase: event === 'started' ? 'llm_request' : 'llm_response', ms,
       observation: event === 'started' ? `第 ${modelCall} 次模型调用：${model}，等待返回`
         : `第 ${modelCall} 次模型返回：${chars} 字符${tokens}` });
   };
   const run = withExecutionControl({ taskId: task.id, executionId: task.execution_id, signal: controller.signal, checkLease, onModelEvent },
-    () => traceTask(task, () => executeTask(task)));
+    () => traceTask(task, () => executeTask(task), { metrics, reportMetrics: false }));
   run.catch(() => {}); // 超时后旧执行的后续异常只记日志
 
   try {
     const result = await Promise.race([run, timeout, interrupted]);
     await updateTask(task.id, { status: 'succeeded', phase: 'done' });
+    outcome = 'succeeded';
     logger.info('task.finished', { taskId: task.id, status: 'succeeded', previewUrl: result?.previewUrl });
   } catch (error) {
+    outcomeError = error;
     // 完成写回在执行上下文之外，仍由原 execution_id 校验；暂停不得被 failed 覆盖。
     if (!controller.signal.aborted) controller.abort(error);
     // 中止旧执行:循环在下一步检查 aborted;停止心跳让租约自然失效,之后的任何写入都会被数据库拒绝
     task.aborted = error?.code === 'TASK_TIMEOUT' ? '任务已超时' : '任务已失败';
     clearInterval(beat);
-    if (error?.code?.startsWith('SUPABASE_')) stopping = true;
+    if (isSupabaseError(error)) stopping = true;
     if (error?.code === 'LEASE_LOST') {
+      outcome = 'interrupted';
       logger.warn('task.lease_lost', { taskId: task.id, error: String(error.message) });
       return;
     }
     const summary = summarizeError(error, task);
     logger.error('task.finished', { taskId: task.id, status: 'failed', ...summary });
     const patch = makeFailurePatch(error, task, summary);
-    await updateTask(task.id, patch).catch((e) => {
+    await updateTask(task.id, patch).then(() => { outcome = 'failed'; }).catch((e) => {
+      outcomeError = e;
+      outcome = e?.code === 'LEASE_LOST' ? 'interrupted' : 'unconfirmed';
       if (e?.code !== 'LEASE_LOST') stopping = true;
       logger.warn('task.fail_write_rejected', { taskId: task.id, error: String(e), hint: '请核对数据库任务状态后重启 Worker' });
     });
@@ -123,6 +140,7 @@ async function handleTask(task) {
     clearInterval(beat);
     // 先等旧本地执行退栈，避免继续任务与尚未返回的沙箱操作并行。
     await run.catch(() => {});
+    logger.info('task.metrics', { ...metricsSnapshot(metrics, outcome, outcomeError), outcome_scope: 'terminal_write' });
     setExecution(task.id, null);
   }
 }
@@ -147,6 +165,8 @@ async function main() {
   logger.info('worker.started', {
     workerId: config.workerId,
     provider: config.llmProvider,
+    fusionEnabled: config.actionFusionEnabled,
+    metricsCodeVersion: config.metricsCodeVersion,
     maxToolSteps: config.maxToolSteps,
     maxFixRounds: config.maxFixRounds,
   });

@@ -44,7 +44,7 @@ export function contrastRatio(a, b) {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-/** 字段与对比度校验;失败抛错,绝不回退到默认值。 */
+/** Only unusable structure blocks execution; quality is reported separately. */
 export function validateDesign(design) {
   if (!design || typeof design !== 'object' || Array.isArray(design)) {
     throw new Error('设计方案校验失败: 必须是 JSON 对象');
@@ -61,9 +61,6 @@ export function validateDesign(design) {
   const badColors = COLOR_TOKENS.filter((t) => !hex.test(design.colors?.[t] ?? ''));
   if (badColors.length) {
     errors.push(`colors.${badColors.join('/')} 必须是 #RRGGBB`);
-  } else {
-    if (contrastRatio(design.colors.text, design.colors.background) < 4.5) errors.push('text/background 对比度需 ≥ 4.5');
-    if (contrastRatio(design.colors.onPrimary, design.colors.primary) < 4.5) errors.push('onPrimary/primary 对比度需 ≥ 4.5');
   }
   if (typeof design.typography?.fontFamily !== 'string' || !design.typography.fontFamily.trim()) {
     errors.push('typography.fontFamily 必须是非空字符串');
@@ -71,8 +68,8 @@ export function validateDesign(design) {
   const badScale = TYPE_SCALE.filter((k) => !/^\d+(\.\d+)?(px|rem)$/.test(design.typography?.scale?.[k] ?? ''));
   if (badScale.length) errors.push(`typography.scale.${badScale.join('/')} 必须形如 16px 或 1rem`);
   const sp = design.spacing;
-  if (!Array.isArray(sp) || sp.length < 4 || !sp.every((n, i) => Number.isFinite(n) && n > 0 && (i === 0 || n > sp[i - 1]))) {
-    errors.push('spacing 必须是至少 4 个递增正数');
+  if (!Array.isArray(sp) || !sp.length || !sp.every(Number.isFinite)) {
+    errors.push('spacing 必须是非空数值数组');
   }
   const bp = design.breakpoints;
   if (!Number.isFinite(bp?.mobile) || !Number.isFinite(bp?.desktop) || bp.mobile >= bp.desktop) {
@@ -83,6 +80,18 @@ export function validateDesign(design) {
   }
   if (errors.length) throw new Error(`设计方案校验失败: ${errors.join('; ')}`);
   return design;
+}
+
+export function designWarnings(design) {
+  const warnings = [];
+  for (const [text, background] of [['text', 'background'], ['onPrimary', 'primary']]) {
+    const ratio = contrastRatio(design.colors[text], design.colors[background]);
+    if (ratio < 4.5) warnings.push(`${text}/${background} 对比度 ${ratio.toFixed(2)}，低于建议的 4.5；保留配色继续`);
+  }
+  if (design.spacing.length < 4 || !design.spacing.every((n, i, values) => n > 0 && (!i || n > values[i - 1]))) {
+    warnings.push('间距数量或递增关系不理想；保留方案继续');
+  }
+  return warnings;
 }
 
 export function parseDesign(raw) {
@@ -152,7 +161,7 @@ export async function resolveDesign({ task, memories, context, deps }) {
     } catch {
       previous = null;
     }
-    if (previous && !change) return { design: previous, source: 'memory' };
+    if (previous && !change) return { design: previous, source: 'memory', warnings: designWarnings(previous) };
   }
 
   const system = previous
@@ -164,22 +173,22 @@ export async function resolveDesign({ task, memories, context, deps }) {
   ];
 
   let lastError;
+  let design;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const raw = await deps.chat(messages, { json: true, temperature: 0.3, taskId: task.id });
+    const raw = await deps.chat(messages, { json: true, temperature: 0.3, taskId: task.id, purpose: 'design', contextParts: { user: task.contextParts } });
     try {
-      const design = parseDesign(raw);
-      await deps.upsertMemory(task.id, {
-        scope: 'project',
-        key: DESIGN_MEMORY_KEY,
-        value: JSON.stringify(design),
-        weight: 10,
-      });
-      return { design, source: previous ? 'updated' : 'generated' };
+      design = parseDesign(raw);
+      break;
     } catch (error) {
       lastError = error;
       messages.push({ role: 'assistant', content: raw });
       messages.push({ role: 'user', content: `设计方案无效(${String(error.message || error)}),请修正后只输出一个 JSON 对象。` });
     }
+  }
+  if (design) {
+    // Persistence failures must not request another design or become DESIGN_INVALID.
+    await deps.upsertMemory(task.id, { scope: 'project', key: DESIGN_MEMORY_KEY, value: JSON.stringify(design), weight: 10 });
+    return { design, source: previous ? 'updated' : 'generated', warnings: designWarnings(design) };
   }
   const error = new Error(`DESIGN_INVALID: ${String(lastError?.message || lastError)}`);
   error.code = 'DESIGN_INVALID';

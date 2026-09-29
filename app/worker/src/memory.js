@@ -1,7 +1,9 @@
-import { admin, executionOf } from './supabase.js';
+import { admin, executionOf, stateError, LeaseLostError } from './supabase.js';
 import { config } from './config.js';
 import { chat, parseJson } from './llm.js';
 import { logger } from './logger.js';
+import { rethrowExecutionControl, assertExecutionActive } from './execution-control.js';
+import { redact } from './telemetry.js';
 
 /**
  * 记忆策略(两种范围):
@@ -36,7 +38,15 @@ export async function suggestMemory(taskId, { key, value }) {
     p_key: key,
     p_value: value,
   });
-  if (error) logger.warn('memory.suggest.failed', { taskId, error: error.message, key });
+  if (error) throwMemoryWriteError('保存偏好建议', taskId, error);
+}
+
+// Persisting design is required; optional extraction handles its own warnings.
+// A rejected lease must never be downgraded to an auxiliary warning.
+function throwMemoryWriteError(operation, taskId, error) {
+  assertExecutionActive();
+  if (error?.code === 'LEASE_LOST' || /\bLEASE_LOST\b/.test(error?.message || '')) throw new LeaseLostError(taskId);
+  throw stateError(operation, error);
 }
 
 export function renderMemories(memories) {
@@ -62,7 +72,7 @@ export async function upsertMemory(taskId, { scope, key, value, weight = 1 }) {
     p_value: value,
     p_weight: weight,
   });
-  if (error) logger.warn('memory.upsert.failed', { taskId, error: error.message, key, scope });
+  if (error) throwMemoryWriteError('保存项目记忆', taskId, error);
 }
 
 export async function deleteMemory(userId, projectId, scope, key) {
@@ -70,44 +80,49 @@ export async function deleteMemory(userId, projectId, scope, key) {
   if (scope === 'project') query.eq('project_id', projectId);
   else query.is('project_id', null);
   const { error } = await query;
-  if (error) logger.warn('memory.delete.failed', { error: error.message, key });
+  if (error) throwMemoryWriteError('删除项目记忆', null, error);
 }
 
 /** 让模型从本轮对话中抽取需要长期保留/失效的记忆项。 */
 export async function extractMemories({ userId, projectId, userPrompt, summary, taskId }, deps = { chat, upsertMemory, suggestMemory, deleteMemory }) {
-  const raw = await deps.chat(
-    [
-      {
-        role: 'system',
-        content:
-          '你负责维护长期记忆。只抽取稳定、可复用的信息,不要记录一次性的临时指令。' +
-          '输出 JSON: {"upsert":[{"scope":"user|project","key":"短标识","value":"一句话","weight":1}],"remove":[{"scope":"user|project","key":"短标识"}]}。' +
-          '没有可记录内容时返回空数组。',
-      },
-      { role: 'user', content: `用户需求:\n${userPrompt}\n\n本轮执行结果摘要:\n${summary}` },
-    ],
-    { json: true, temperature: 0, taskId }
-  );
-
-  let payload;
   try {
-    payload = parseJson(raw);
-  } catch (error) {
-    logger.warn('memory.extract.parse_failed', { taskId, error: String(error) });
-    return;
-  }
+    const raw = await deps.chat(
+      [
+        {
+          role: 'system',
+          content:
+            '你负责维护长期记忆。只抽取稳定、可复用的信息,不要记录一次性的临时指令。' +
+            '输出 JSON: {"upsert":[{"scope":"user|project","key":"短标识","value":"一句话","weight":1}],"remove":[{"scope":"user|project","key":"短标识"}]}。' +
+            '没有可记录内容时返回空数组。',
+        },
+        { role: 'user', content: `用户需求:\n${userPrompt}\n\n本轮执行结果摘要:\n${summary}` },
+      ],
+      { json: true, temperature: 0, taskId, purpose: 'memory_extraction' }
+    );
 
-  // 设计约定只由 resolveDesign 维护,避免自动抽取把它覆盖或删除
-  const isDesign = (item) => item?.key === 'design_system';
-  for (const item of payload.upsert || []) {
-    if (!item?.key || !item?.value || isDesign(item)) continue;
-    if (item.scope === 'project') await deps.upsertMemory(taskId, item);
-    else if (item.scope === 'user') await deps.suggestMemory(taskId, item); // 不自动写入全局偏好
-  }
-  // 只允许自动移除项目约定;全局偏好只能由用户在记忆面板管理
-  for (const item of payload.remove || []) {
-    if (item?.key && item.scope === 'project' && !isDesign(item)) {
-      await deps.deleteMemory(userId, projectId, item.scope, item.key);
+    let payload;
+    try {
+      payload = parseJson(raw);
+    } catch (error) {
+      logger.warn('memory.extract.parse_failed', { taskId, error: String(error) });
+      return;
     }
+
+    // 设计约定只由 resolveDesign 维护,避免自动抽取把它覆盖或删除
+    const isDesign = (item) => item?.key === 'design_system';
+    for (const item of payload.upsert || []) {
+      if (!item?.key || !item?.value || isDesign(item)) continue;
+      if (item.scope === 'project') await deps.upsertMemory(taskId, item);
+      else if (item.scope === 'user') await deps.suggestMemory(taskId, item); // 不自动写入全局偏好
+    }
+    // 只允许自动移除项目约定;全局偏好只能由用户在记忆面板管理
+    for (const item of payload.remove || []) {
+      if (item?.key && item.scope === 'project' && !isDesign(item)) {
+        await deps.deleteMemory(userId, projectId, item.scope, item.key);
+      }
+    }
+  } catch (error) {
+    rethrowExecutionControl(error);
+    logger.warn('memory.extract.failed', { taskId, error: redact(error?.message || error), auxiliary: true });
   }
 }

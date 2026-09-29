@@ -1,15 +1,30 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 const storage = new AsyncLocalStorage();
+const controlErrors = new WeakSet();
 export const currentExecution = () => storage.getStore();
 export const withExecutionControl = (context, fn) => storage.run(context, fn);
+/** DOMException.code 可为数字；只有平台字符串错误码才能按前缀判断。 */
+export function isSupabaseError(error) {
+  return typeof error?.code === 'string' && error.code.startsWith('SUPABASE_');
+}
 export function assertExecutionActive() {
   currentExecution()?.signal.throwIfAborted();
 }
 export async function beforeModelCall() {
   assertExecutionActive();
-  await currentExecution()?.checkLease();
+  try { await currentExecution()?.checkLease(); }
+  catch (error) {
+    if (error && typeof error === 'object') controlErrors.add(error);
+    throw error;
+  }
   assertExecutionActive();
+}
+
+/** Auxiliary failures may be warnings; execution permission failures never are. */
+export function rethrowExecutionControl(error) {
+  assertExecutionActive();
+  if (controlErrors.has(error) || ['LEASE_LOST', 'ABORTED', 'TASK_TIMEOUT', 'TASK_PAUSED', 'TASK_CANCELLED'].includes(error?.code)) throw error;
 }
 
 /** 串行探测，避免慢请求导致多个检查堆叠。失败即停止，不在未知权限下继续花费。 */

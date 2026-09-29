@@ -213,6 +213,20 @@ export async function listFiles(projectId) {
   return data || [];
 }
 
+/** Project-scoped immutable change events, including resolutions written by later tasks. */
+export async function listChangeJournals(projectId) {
+  const rows = [];
+  for (let offset = 0; ; offset += 100) {
+    const { data, error } = await admin.from('ita_tasks').select('id,steps')
+      // The SDK serializes JS arrays as PostgreSQL arrays, not JSONB arrays.
+      .eq('project_id', projectId).contains('steps', JSON.stringify([{ tool: 'change_journal' }]))
+      .order('created_at').order('id').range(offset, offset + 99);
+    if (error) throw stateError('修改记录读取', error);
+    rows.push(...(data || []));
+    if (!data || data.length < 100) return rows;
+  }
+}
+
 export async function upsertFile(task, path, content) {
   await ensureLease(task.id);
   const { error } = await admin.from('ita_files').upsert(

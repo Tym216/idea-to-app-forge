@@ -34,8 +34,8 @@ test('同一 worker 重新领取后:E1 的心跳/任务/步骤/文件/计划/记
   await assert.rejects(sb.ensureLease('t1'), lost);
   await assert.rejects(sb.savePlan(task, 'action', {}), lost);
   const before = db.calls.length;
-  await upsertMemory('t1', { scope: 'project', key: 'k', value: 'v' });
-  assert.equal(db.calls[before].exec, 'E1'); // 记忆写入以 E1 调用,数据库拒绝(只记 warn)
+  await assert.rejects(upsertMemory('t1', { scope: 'project', key: 'k', value: 'v' }), lost);
+  assert.equal(db.calls[before].exec, 'E1'); // 数据库拒绝旧执行；Worker 必须传播租约失效，不能只记 warn
 
   sb.setExecution('t1', 'E2');
   await sb.heartbeat('t1');
@@ -54,6 +54,7 @@ test('恢复后预算已重置:历史累计 40 步/6 轮的任务仍能 build �
   let i = 0;
   const steps = [];
   const deps = {
+    checkLease: async () => {},
     chat: async () => JSON.stringify(actions[Math.min(i++, actions.length - 1)]),
     appendStep: async (_t, s) => steps.push(s),
     updateTask: async () => {}, updateProject: async () => {}, upsertFile: async () => {}, deleteFile: async () => {},

@@ -44,6 +44,8 @@ function fakeDeps(actions) {
   return {
     steps,
     upserts,
+    checkLease: async () => {},
+    listFiles: async () => [],
     chat: async () => JSON.stringify(actions[Math.min(i++, actions.length - 1)]),
     appendStep: async (t, s) => { steps.push(s); (t.steps ||= []).push(s); },
     updateTask: async () => {},
@@ -53,11 +55,11 @@ function fakeDeps(actions) {
   };
 }
 
-const finishedSteps = (deps) => deps.steps.filter((step) => step.event !== 'started');
+const finishedSteps = (deps) => deps.steps.filter((step) => step.event !== 'started' && step.tool !== 'change_journal');
 
 const newTask = () => ({ id: 't', user_id: 'u', project_id: 'p', tool_steps: 0, fix_rounds: 0 });
 
-test('连续无效模型输出最多三次，每次有活动记录且不把长输出加入上下文', async () => {
+test('连续无效模型输出只修正一次，每次有活动记录且不把长输出加入上下文', async () => {
   const deps = fakeDeps([]);
   let calls = 0;
   deps.chat = async (messages) => {
@@ -68,10 +70,20 @@ test('连续无效模型输出最多三次，每次有活动记录且不把长�
   const task = newTask();
   const sb = fakeSandbox();
   await assert.rejects(runBuild(task, {}, sb, 's', 'ctx', deps), { code: 'LLM_FORMAT_STALLED' });
-  assert.equal(calls, 3);
-  assert.equal(task.tool_steps, 3);
-  assert.equal(deps.steps.filter((s) => s.tool === 'llm_parse_error').length, 3);
+  assert.equal(calls, 2);
+  assert.equal(task.tool_steps, 2);
+  assert.equal(deps.steps.filter((s) => s.tool === 'llm_parse_error').length, 2);
   assert.equal(sb.calls.length, 0);
+});
+
+test('缺少 write_file 的 content 按协议修正一次，不能当成空文件写入', async () => {
+  const deps = fakeDeps([{ tool: 'write_file', args: { path: 'src/App.tsx' } }]);
+  const task = newTask();
+  const sb = fakeSandbox();
+  await assert.rejects(runBuild(task, {}, sb, 's', 'ctx', deps), { code: 'LLM_FORMAT_STALLED' });
+  assert.equal(task.tool_steps, 2);
+  assert.deepEqual(sb.calls, []);
+  assert.deepEqual(deps.upserts, []);
 });
 
 test('浏览器验收工具故障立即停止，不继续调用模型或计入应用修复轮数', async () => {

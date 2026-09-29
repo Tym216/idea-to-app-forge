@@ -91,14 +91,14 @@ export function validateAction(plan) {
 }
 
 /** 调用模型并校验;失败把错误反馈给模型重试一次,仍失败抛错(不使用默认值)。 */
-export async function generateStructured({ chat, system, context, validate, taskId, code }) {
+export async function generateStructured({ chat, system, context, validate, taskId, code, purpose = 'plan', contextParts }) {
   const messages = [
     { role: 'system', content: system },
     { role: 'user', content: context },
   ];
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const raw = await chat(messages, { json: true, temperature: 0.3, taskId });
+    const raw = await chat(messages, { json: true, temperature: 0.3, taskId, purpose, contextParts: { user: contextParts } });
     try {
       return validate(parseJson(raw));
     } catch (error) {
@@ -179,6 +179,7 @@ export function applyToolResult(stages, tool, ok, note = '') {
     case 'read_file':
       if (ok && !done('read')) set('read', 'done');
       break;
+    case 'apply_changes':
     case 'write_file':
     case 'delete_file':
       if (!done('read')) set('read', 'done', '沿用上下文中的代码');
@@ -204,7 +205,7 @@ export function applyToolResult(stages, tool, ok, note = '') {
 }
 
 export function markRunning(stages, tool) {
-  const key = { list_files: 'read', read_file: 'read', write_file: 'edit', delete_file: 'edit', build: 'build', start_dev: 'start', verify: 'verify' }[tool];
+  const key = { list_files: 'read', read_file: 'read', write_file: 'edit', apply_changes: 'edit', delete_file: 'edit', build: 'build', start_dev: 'start', verify: 'verify' }[tool];
   const s = stages.find((x) => x.key === key);
   if (s && s.status !== 'done') {
     s.status = 'running';

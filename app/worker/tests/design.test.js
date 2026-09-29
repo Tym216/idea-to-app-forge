@@ -6,6 +6,7 @@ process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-placeholder';
 
 const {
   DESIGN_MEMORY_KEY,
+  designWarnings,
   parseDesign,
   renderDesignPrompt,
   renderDesignTokensCss,
@@ -38,10 +39,12 @@ function fakeDeps(outputs) {
   return { writes, calls: () => i, chat: async () => outputs[i++], upsertMemory: async (id, m) => writes.push({ id, ...m }) };
 }
 
-test('方案 JSON 解析与字段校验:合法通过,缺字段/低对比度被拒绝', () => {
+test('方案仅拒绝非法结构，低对比度保留且报告 warning', () => {
   assert.equal(parseDesign(JSON.stringify(TODO_DESIGN)).layout.type, 'single-column');
   assert.throws(() => parseDesign(JSON.stringify({ ...TODO_DESIGN, layout: { type: 'fancy' } })), /layout\.type/);
-  assert.throws(() => parseDesign(JSON.stringify({ ...TODO_DESIGN, colors: { ...TODO_DESIGN.colors, text: '#EEEEEE' } })), /对比度/);
+  const low = parseDesign(JSON.stringify({ ...TODO_DESIGN, colors: { ...TODO_DESIGN.colors, text: '#EEEEEE' } }));
+  assert.equal(low.colors.text, '#EEEEEE');
+  assert.match(designWarnings(low).join(' '), /text\/background/);
   assert.throws(() => parseDesign(JSON.stringify({ ...TODO_DESIGN, states: ['sparkle'] })), /states/);
   assert.throws(() => parseDesign('不是 JSON'), /没有 JSON/);
 });
@@ -56,11 +59,33 @@ test('首次生成:写入 project 记忆 design_system(upsert)', async () => {
 });
 
 test('校验失败走反馈重试,仍失败抛 DESIGN_INVALID,不静默使用默认值', async () => {
-  const bad = JSON.stringify({ ...TODO_DESIGN, spacing: [8, 4] });
+  const bad = JSON.stringify({ ...TODO_DESIGN, spacing: null });
   const deps = fakeDeps([bad, bad]);
   await assert.rejects(resolveDesign({ task: task('待办'), memories: [], context: 'c', deps }), (e) => e.code === 'DESIGN_INVALID');
   assert.equal(deps.writes.length, 0);
   assert.equal(deps.calls(), 2);
+});
+
+test('真实失败配色及非理想间距只生成一次，保存原值而非重调或自动改色', async () => {
+  for (const primary of ['#4caf50', '#2196f3']) {
+    const original = { ...TODO_DESIGN, spacing: [8, 4], colors: { ...TODO_DESIGN.colors, primary, onPrimary: '#ffffff' } };
+    const deps = fakeDeps([JSON.stringify(original)]);
+    const result = await resolveDesign({ task: task('贪吃蛇'), memories: [], context: 'c', deps });
+    assert.equal(deps.calls(), 1);
+    assert.deepEqual(result.design, original);
+    assert.equal(result.warnings.length, 2);
+    const cached = await resolveDesign({ task: task('继续'), memories: [{ scope: 'project', key: DESIGN_MEMORY_KEY, value: JSON.stringify(original) }], context: 'c', deps });
+    assert.equal(cached.source, 'memory');
+    assert.equal(deps.calls(), 1);
+  }
+});
+
+test('保存设计失败保持原始存储错误，不触发重新生成或 DESIGN_INVALID', async () => {
+  const deps = fakeDeps([JSON.stringify(TODO_DESIGN)]);
+  const failure = Object.assign(new Error('storage failed'), { code: 'SUPABASE_STATE' });
+  deps.upsertMemory = async () => { throw failure; };
+  await assert.rejects(resolveDesign({ task: task('待办'), memories: [], context: 'c', deps }), (e) => e === failure);
+  assert.equal(deps.calls(), 1);
 });
 
 test('增量修改:注入已有方案,不调用模型、不覆盖记忆', async () => {
@@ -127,6 +152,7 @@ test('build 工具在构建前拦截未声明依赖,不执行 npm 构建', async
   const steps = [];
   const execs = [];
   const deps = {
+    checkLease: async () => {},
     chat: async () => JSON.stringify({ tool: 'build', args: {} }),
     appendStep: async (_t, s) => steps.push(s), updateTask: async () => {}, updateProject: async () => {}, upsertFile: async () => {}, deleteFile: async () => {},
   };
