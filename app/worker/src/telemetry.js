@@ -1,4 +1,6 @@
 import { logger } from './logger.js';
+import { config } from './config.js';
+import { createTaskMetrics, withTaskMetrics, metricsSnapshot } from './task-metrics.js';
 
 /**
  * 最小 Langfuse Cloud 观测(OpenTelemetry)。
@@ -45,6 +47,11 @@ export function captureLlmMessages(messages, env = process.env) {
 
 export function captureLlmOutput(content, env = process.env) {
   return env.LANGFUSE_CAPTURE_CONTENT === 'true' ? redact(content, 120000) : undefined;
+}
+
+/** SDK 会将输入/输出序列化为字符串；导出上限不能截掉正常的多轮消息。 */
+export function maskTelemetryData({ data }) {
+  return typeof data === 'string' ? redact(data, 120000) : data;
 }
 
 /**
@@ -96,7 +103,7 @@ export async function initTelemetry(env = process.env) {
           secretKey: cfg.secretKey,
           baseUrl: cfg.baseUrl,
           // 兜底:导出前再做一次脱敏
-          mask: ({ data }) => (typeof data === 'string' ? redact(data, 2000) : data),
+          mask: maskTelemetryData,
         }),
       ],
     });
@@ -114,8 +121,10 @@ export async function initTelemetry(env = process.env) {
 
 const noop = { update() {} };
 function safeObs(obs) {
+  let metadata = {};
   return {
     update(attrs) {
+      if (attrs.metadata) { metadata = { ...metadata, ...attrs.metadata }; attrs = { ...attrs, metadata }; }
       try { obs.update(attrs); } catch (error) { logger.warn('telemetry.update_failed', { error: redact(error?.message || error) }); }
     },
   };
@@ -157,7 +166,7 @@ export async function withObservation(name, attrs, asType, fn) {
 }
 
 /** 每次任务执行一个根 observation(新 trace);sessionId=task_id 关联同一任务的多次执行/恢复。 */
-export async function traceTask(task, fn) {
+export async function traceTask(task, fn, options = {}) {
   const metadata = {
     task_id: task.id,
     execution_id: task.execution_id ?? null,
@@ -167,11 +176,18 @@ export async function traceTask(task, fn) {
     resumes: task.resumes ?? 0,
     attempts: task.attempts ?? null,
   };
-  const run = () => withObservation('forge.task', { metadata }, 'agent', async (obs) => {
-    const result = await fn();
-    obs.update({ metadata: { ...metadata, status: 'succeeded' } });
-    return result;
-  });
+  const metrics = options.metrics ?? createTaskMetrics(task, { fusionEnabled: config.actionFusionEnabled, codeVersion: config.metricsCodeVersion });
+  const run = () => withTaskMetrics(metrics, () => withObservation('forge.task', { metadata }, 'agent', async (obs) => {
+    let status = 'succeeded';
+    let failure;
+    try { return await fn(); }
+    catch (error) { status = error?.code === 'LEASE_LOST' || error?.code === 'ABORTED' ? 'interrupted' : 'failed'; failure = error; throw error; }
+    finally {
+      const snapshot = metricsSnapshot(metrics, status, failure);
+      obs.update({ metadata: { ...metadata, ...snapshot, outcome_scope: 'executor' } });
+      if (options.reportMetrics !== false) logger.info('task.metrics', { ...snapshot, outcome_scope: 'executor' });
+    }
+  }));
   if (!tracing?.propagateAttributes) return run();
   // 传播键使用 SDK 支持的字母数字形式；任务根节点原有 snake_case 字段保留。
   const propagated = { taskId: String(task.id) };

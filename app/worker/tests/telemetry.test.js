@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 process.env.SUPABASE_URL ||= 'http://127.0.0.1:1';
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-placeholder';
 process.env.DEEPSEEK_API_KEY = 'sk-testsecretkey1234567890';
+process.env.DEEPSEEK_MODEL = "deepseek-chat"; // 固定 mock 模型，不继承开发者 .env
 process.env.LLM_PROVIDER = 'deepseek';
 process.env.LANGFUSE_CAPTURE_CONTENT = 'false';
 

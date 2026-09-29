@@ -5,6 +5,8 @@
 import { envFileLoaded } from './env.js';
 import { createClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
+import { config } from './config.js';
+import { PROVIDERS, resolveProvider, buildRequestBody, requestHeaders } from './llm-provider.js';
 
 const env = (name) => (process.env[name] || '').trim();
 const mask = (value) => (!value ? '(空)' : value.length <= 8 ? '****' : `${value.slice(0, 4)}****${value.slice(-4)}`);
@@ -31,16 +33,23 @@ function checkEnv() {
   console.log('\n[1/4] 环境变量');
   console.log(envFileLoaded ? '   已加载 app/worker/.env' : '   未找到 app/worker/.env(将只读取进程环境变量)');
 
-  const provider = env('LLM_PROVIDER') || 'deepseek';
-  const llmKeyName = provider === 'zhipu' ? 'ZHIPU_API_KEY' : 'DEEPSEEK_API_KEY';
-  if (!['deepseek', 'zhipu'].includes(provider)) {
-    bad(`LLM_PROVIDER=${provider} 无效`, '只能填 deepseek 或 zhipu');
+  const provider = config.llmProvider;
+  const spec = PROVIDERS[provider];
+  const llmKeyName = spec ? `${spec.prefix}_API_KEY` : null;
+  if (!spec) bad('LLM_PROVIDER 无效', `可选 ${Object.keys(PROVIDERS).join(' / ')}`);
+  if (spec) {
+    try {
+      const selected = resolveProvider(config);
+      if (!selected.model) bad(`${spec.prefix}_MODEL 未配置`, '填写账号可用的明确模型 ID');
+      else ok(`模型选择: ${provider} / ${selected.model}; JSON 模式: ${selected.jsonMode}`);
+      if (spec.keyOptional) ok(`${llmKeyName}: ${selected.key ? mask(selected.key) : '未设置（本地接口可免 Key）'}`);
+    } catch (error) { bad(error.message); }
   }
 
   const required = [
     ['SUPABASE_URL', 'Supabase → Project Settings → API → Project URL', false],
     ['SUPABASE_SERVICE_ROLE_KEY', 'Supabase → Project Settings → API → service_role / secret key(只放 Worker)', true],
-    [llmKeyName, provider === 'zhipu' ? 'https://open.bigmodel.cn → API 密钥' : 'https://platform.deepseek.com → API keys', true],
+    ...(spec && !spec.keyOptional ? [[llmKeyName, `${spec.help} → API keys`, true]] : []),
     ['DAYTONA_API_KEY', 'https://app.daytona.io → Keys → Create Key', true],
     ['DAYTONA_API_URL', '通常填 https://app.daytona.io/api', false],
   ];
@@ -53,7 +62,7 @@ function checkEnv() {
 
   for (const name of ['MAX_TOOL_STEPS', 'MAX_FIX_ROUNDS']) {
     const value = env(name);
-    if (!value) ok(`${name} 未设置,使用默认值 ${name === 'MAX_TOOL_STEPS' ? 40 : 6}`);
+    if (!value) ok(`${name} 未设置,使用默认值 ${name === 'MAX_TOOL_STEPS' ? config.maxToolSteps : config.maxFixRounds}`);
     else if (!/^\d+$/.test(value) || Number(value) < 1) bad(`${name}=${value} 不是正整数`);
     else ok(`${name} = ${value}`);
   }
@@ -92,28 +101,30 @@ async function checkSupabase() {
 
 async function checkLlm({ provider, llmKeyName }) {
   console.log(`\n[3/4] 大模型(${provider})`);
-  const key = env(llmKeyName);
-  if (!key) return skip(`缺少 ${llmKeyName},跳过`);
-
-  const baseUrl = provider === 'zhipu'
-    ? env('ZHIPU_BASE_URL') || 'https://open.bigmodel.cn/api/paas/v4'
-    : env('DEEPSEEK_BASE_URL') || 'https://api.deepseek.com/v1';
-  const model = provider === 'zhipu' ? env('ZHIPU_MODEL') || 'glm-4-plus' : env('DEEPSEEK_MODEL') || 'deepseek-chat';
+  if (!llmKeyName) return skip('供应商配置无效,跳过');
+  let selected;
+  try { selected = resolveProvider(config); }
+  catch { return skip('模型配置无效,跳过'); }
+  const { model, url } = selected;
+  if (selected.requiresKey && !selected.key) return skip(`缺少 ${llmKeyName},跳过`);
+  if (!model) return skip('缺少模型名,跳过');
 
   try {
-    const started = Date.now();
-    const res = await timedFetch(`${baseUrl}/chat/completions`, {
+    const started = performance.now();
+    const res = await timedFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: '回复 ok' }], max_tokens: 5, temperature: 0 }),
+      headers: requestHeaders(selected.key),
+      body: JSON.stringify(buildRequestBody({ providerName: provider, model, messages: [{ role: 'user', content: '请简短回复 ok。' }], temperature: 0, json: false, upstream: config.openrouterUpstream })),
     });
     const text = await res.text();
     if (!res.ok) {
       bad(`${model} 返回 HTTP ${res.status}:${text.slice(0, 200)}`, res.status === 401 ? 'API Key 无效' : '检查模型名、余额或网络');
       return;
     }
-    const reply = JSON.parse(text)?.choices?.[0]?.message?.content ?? '';
-    ok(`${model} 可用,${Date.now() - started}ms,回复:${JSON.stringify(reply.slice(0, 20))}`);
+    const payload = JSON.parse(text);
+    const reply = payload?.choices?.[0]?.message?.content;
+    if (typeof reply !== 'string' || !reply.trim()) { bad(`${model} 未返回可用文本`, '检查模型是否支持文本 Chat Completions'); return; }
+    ok(`${model} 可用,${Math.round(performance.now() - started)}ms,返回模型:${payload.model || '(未提供)'},回复:${JSON.stringify(reply.slice(0, 20))}`);
   } catch (error) {
     bad(`请求模型失败:${String(error.message || error)}`, '检查网络或 BASE_URL');
   }

@@ -2,9 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildRequestBody, classifyModelFetchError, parseJson } from '../src/llm.js';
 
-test('zhipu glm-4-plus 不发送 response_format,其他模型保留', () => {
+test('zhipu 已确认不兼容模型在 auto 下不发送 response_format,其他模型保留', () => {
   const base = { messages: [], temperature: 0.1, json: true };
-  assert.equal(buildRequestBody({ ...base, providerName: 'zhipu', model: 'glm-4-plus' }).response_format, undefined);
+  for (const model of ['glm-4-plus', 'glm-4.5-air']) {
+    assert.ok(!Object.hasOwn(buildRequestBody({ ...base, providerName: 'zhipu', model }), 'response_format'));
+    assert.deepEqual(buildRequestBody({ ...base, providerName: 'zhipu', model, jsonMode: 'on' }).response_format, { type: 'json_object' });
+  }
+  assert.deepEqual(buildRequestBody({ ...base, providerName: 'zhipu', model: 'another-model' }).response_format, { type: 'json_object' });
   assert.deepEqual(buildRequestBody({ ...base, providerName: 'deepseek', model: 'deepseek-chat' }).response_format, {
     type: 'json_object',
   });
