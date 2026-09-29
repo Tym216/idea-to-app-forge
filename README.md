@@ -24,7 +24,7 @@ Forge 是一个 idea-to-app 原型：用户用自然语言描述需求，审阅�
 flowchart LR
     UI[React 工作区] -->|登录、提交、批准、轮询| DB[Supabase Auth / Postgres / RPC]
     W[独立 Node Worker] <-->|领取、续租、步骤与代码持久化| DB
-    W -->|模型调用| LLM[智谱 / DeepSeek]
+    W -->|模型调用| LLM[智谱 / DeepSeek / OpenRouter / Gemini / Ollama / LM Studio]
     W -->|文件、命令、浏览器验收| SB[Daytona 沙箱]
     SB -->|预览 URL| UI
     W -. 可选观测 .-> LF[Langfuse]
@@ -121,6 +121,31 @@ MAX_FIX_ROUNDS=1
 ```
 
 `glm-4.5-air` 是实际使用过的配置，不代表任意请求都已稳定通过。切换 DeepSeek 时，改为 `LLM_PROVIDER=deepseek`，并填写 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`；默认模型名为 `deepseek-chat`。没有配置 provider 时，代码默认选择 DeepSeek；智谱的代码默认模型为 `glm-4-plus`，建议显式填写。
+
+也支持 OpenRouter 和 Gemini 直连的 Chat Completions 兼容入口。以下模型名为占位符，必须替换成自己账号可用的文本模型 ID；Key 仅填入 Worker。
+
+```dotenv
+# 二选一；将另一组保留为空即可
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=YOUR_OPENROUTER_KEY
+OPENROUTER_MODEL=vendor/model-id
+OPENROUTER_JSON_MODE=off
+# 可选：固定 OpenRouter 上游供应商 slug
+OPENROUTER_UPSTREAM=
+```
+
+```dotenv
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=YOUR_GOOGLE_AI_STUDIO_KEY
+GEMINI_MODEL=YOUR_AVAILABLE_GEMINI_MODEL_ID
+GEMINI_JSON_MODE=off
+```
+
+OpenRouter 默认 Base URL 为 `https://openrouter.ai/api/v1`；Gemini 为 `https://generativelanguage.googleapis.com/v1beta/openai`，不是 Vertex AI 的认证入口。可用对应的 `*_BASE_URL` 覆盖。新入口不默认发送 temperature，也不强制 `response_format`，仍由提示词要求 JSON、解析层校验；确认模型支持 `json_object` 后可将 `*_JSON_MODE` 设为 `on`。这不改变现有 Agent 的工具协议。
+
+OpenRouter 请求明确关闭上游故障降级；未指定 `OPENROUTER_UPSTREAM` 时，首次上游仍由 OpenRouter 选择。平台不会自动更换模型。Langfuse 继续记录请求模型、响应模型及真实用量，响应提供上游名时也会记录。接口依据 [OpenRouter 文档](https://openrouter.ai/docs/api_reference/overview) 和 [Gemini 兼容文档](https://ai.google.dev/gemini-api/docs/openai)；新增接口仅完成本地替身请求测试，尚未用真实 Key 验证。
+
+切换模型需先暂停或结束当前任务、停止 Worker，修改 `.env` 后重启。当前配置属于整个 Worker，不是每个项目独立设置；恢复旧任务也会使用重启后的模型。比较模型时使用全新项目、相同需求和预算，避免历史代码与设计记忆影响结果。
 
 Worker 自动加载自己的 `.env`。在该目录运行：
 
@@ -219,7 +244,7 @@ node preview-recovery.test.mjs
 
 | 验证项 | 截至本次核对的结果与边界 |
 |---|---|
-| Worker | 全量 **88/88** 通过，语法检查通过；主要为本地单元和替身服务测试 |
+| Worker | 全量 **139/139** 通过，语法检查通过；主要为本地单元和替身服务测试 |
 | 数据库基础、计划、暂停、预览恢复 | PGlite 测试通过，不能代替 Supabase 云端全流程验收 |
 | 数据库删除测试 | **未通过**：`ita_complete_project_deletion` 调用参数与当前迁移签名不一致，执行中断 |
 | 前端 | 已通过本地 lint/build；`/ui-mock` 为模拟展示，不能作为真实生成证据 |
@@ -268,3 +293,15 @@ docker logs -f forge-worker
 | 生产边界 | 尚未覆盖应用后端自动部署、全面视觉审查、长期稳定性与生产安全审计 |
 
 管理员辅助命令：在 Worker 目录用 `node src/admin-account.js` 交互修改指定 Auth 用户的邮箱/密码并保留 UID；`npm run admin:sandboxes` 默认只核对孤儿沙箱。这些命令不应在浏览器执行。
+
+## 9. 调用测量与 Action Fusion（默认关闭）
+
+Worker 现在记录实际模型请求数、供应商 tokens、耗时、首预览时间和构建/验收次数，包括失败与恢复。可选的 `ACTION_FUSION_ENABLED=true` 开启有界的批量文件写入，并按任务 policy 自动推进已确定的构建后验证；不改变批准的验收定义。未确认写入先核对，再恢复，不自动重放。
+
+没有新增依赖或数据库迁移，也没有修改现有 `.env`。配置、baseline 收集、离线对比命令及限制见 [Action Fusion 说明](docs/action-fusion.md)。真实性能收益尚未测量，不能把离线回归结果当作真实模型成功率或成本结论。
+
+Worker 将逻辑调用与实际 Provider 请求分别记录。明确的短暂故障最多重发一次，共享原请求的 120 秒预算；超时、余额不足和鉴权失败不自动重发。设计对比度/间距问题只提示并继续，协议错误最多修正一次；辅助记忆失败不阻塞主任务，执行许可失败仍停止。命令超时结果不明时不盲目重放。详见 [重试策略](docs/retry-policy.md)。
+
+## 本地模型
+
+Ollama 和 LM Studio 复用 OpenAI 兼容入口，可不填 API Key，仍需填写已下载/加载的模型 ID。端点、WSL 地址、自检及 DeepSeek thinking 解析边界见 [本地模型说明](docs/local-models.md)。

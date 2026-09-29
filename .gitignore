@@ -1,96 +1,72 @@
-SUBMISSION.md
-DEMO-NOTES.md
-
-# Windows download metadata
-*:Zone.Identifier
-
-# Local agent/tool metadata
-.atoms/
-
-# Runtime uploads
-uploads/
-
-# One-off repair scripts
-repair-failed-task-once.mjs
-restore-preview-once.mjs
-
-# Dependencies
-node_modules/
-
-# Environment variables / secrets
+# Local configuration and credentials (keep public examples)
 .env
 .env.*
 !.env.example
+!.env.*.example
+*.pem
+*.key
 
-# Build outputs
+# Dependencies, build output and caches
+node_modules/
 dist/
 build/
+coverage/
+.vite/
+.cache/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+.venv/
+
+# Logs and browser-test artifacts
+*.log
+playwright-report/
+test-results/
+
+# Private submission notes and agent workspace metadata
+/SUBMISSION.md
+/DEMO-NOTES.md
+/.atoms/
+/.wiki.md
+**/.mgx/
+/uploads/
+
+# One-off local recovery scripts
+/repair-failed-task-once.mjs
+/restore-preview-once.mjs
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# Additional generated artifacts and local credentials
 .next/
 out/
-coverage/
-
-# Caches
-.cache/
 .parcel-cache/
-.vite/
 .turbo/
 .eslintcache
-*.tsbuildinfo
-
-# Logs
 logs/
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Runtime / temp files
 tmp/
 temp/
 *.tmp
 *.temp
 *.pid
 *.pid.lock
-
-# Local test / browser artifacts
-playwright-report/
-test-results/
 blob-report/
 screenshots/
 videos/
 traces/
-
-# Local browser / fixture experiments
-browser_fixture_check.mjs
-_pre_browser_debug_backup/
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# IDE / editors
-.vscode/
-.idea/
+/browser_fixture_check.mjs
+/_pre_browser_debug_backup/
 *.swp
 *.swo
-
-# WSL / Linux local files
 *~
 .nfs*
-
-# Local database files, if any
 *.sqlite
 *.sqlite3
 *.db
 *.db-journal
-
-# Misc local credentials
-*.pem
-*.key
 *.crt
-
-# Do NOT ignore package lockfiles:
-# package-lock.json
-# pnpm-lock.yaml
-# yarn.lock
