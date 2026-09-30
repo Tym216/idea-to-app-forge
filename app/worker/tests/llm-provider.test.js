@@ -15,8 +15,8 @@ test('各供应商独立选择密钥与模型,规范化 endpoint', () => {
 
 test('未知供应商及缺少模型拒绝,不隐式退到 DeepSeek', () => {
   assert.throws(() => resolveProvider({ llmProvider: 'typo', deepseekApiKey: 'test' }), /LLM_PROVIDER/);
-  assert.deepEqual(providerProblems({ llmProvider: 'gemini', geminiApiKey: 'test' }), ['GEMINI_MODEL']);
-  assert.deepEqual(providerProblems({ llmProvider: 'openrouter' }), ['OPENROUTER_API_KEY', 'OPENROUTER_MODEL']);
+  assert.deepEqual(providerProblems({ llmProvider: 'gemini', geminiApiKey: 'test' }), ['GEMINI_MODEL 或 LLM_MODEL']);
+  assert.deepEqual(providerProblems({ llmProvider: 'openrouter' }), ['OPENROUTER_API_KEY 或 LLM_API_KEY', 'OPENROUTER_MODEL 或 LLM_MODEL']);
   assert.ok(providerProblems({ llmProvider: 'openrouter', openrouterApiKey: 'test', openrouterModel: 'test', openrouterJsonMode: 'bad' }).some((x) => x.includes('JSON_MODE')));
 });
 
@@ -44,7 +44,7 @@ test('新增供应商通过真实 chat 入口使用正确请求,保留返回文�
   const snapshot = { ...config };
   const savedFetch = globalThis.fetch;
   try {
-    Object.assign(config, { supabaseUrl: 'https://example.test', supabaseServiceRoleKey: 'test', daytonaApiKey: 'test' });
+    Object.assign(config, { llmModel: '', llmBaseUrl: '', llmApiKey: '', llmJsonMode: '', planTemperature: null, buildTemperature: null, planProviderOptionsRaw: '', buildProviderOptionsRaw: '', supabaseUrl: 'https://example.test', supabaseServiceRoleKey: 'test', daytonaApiKey: 'test' });
     for (const name of ['openrouter', 'gemini']) {
       const field = PROVIDERS[name].field;
       Object.assign(config, { llmProvider: name, [`${field}ApiKey`]: 'test-key', [`${field}Model`]: 'test-model', [`${field}JsonMode`]: 'off' });

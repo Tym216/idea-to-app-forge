@@ -19,6 +19,18 @@ export const config = {
 
   // LLM:运行进程启动时选择供应商，不做自动模型降级
   llmProvider: optional('LLM_PROVIDER', 'deepseek'),
+  llmModel: optional('LLM_MODEL'),
+  llmBaseUrl: optional('LLM_BASE_URL'),
+  llmApiKey: optional('LLM_API_KEY'),
+  llmJsonMode: optional('LLM_JSON_MODE'),
+  llmTimeoutMs: Number(optional('LLM_TIMEOUT_MS', '120000')),
+  planTemperature: optional('PLAN_TEMPERATURE') === '' ? null : Number(optional('PLAN_TEMPERATURE')),
+  buildTemperature: optional('BUILD_TEMPERATURE') === '' ? null : Number(optional('BUILD_TEMPERATURE')),
+  planProviderOptionsRaw: optional('PLAN_PROVIDER_OPTIONS'),
+  buildProviderOptionsRaw: optional('BUILD_PROVIDER_OPTIONS'),
+  planReasoningMode: optional('PLAN_REASONING_MODE', 'off'),
+  planReasoningPolicy: optional('PLAN_REASONING_POLICY', 'best_effort'),
+  llmReasoningProfile: optional('LLM_REASONING_PROFILE', 'auto'),
   deepseekApiKey: optional('DEEPSEEK_API_KEY'),
   deepseekBaseUrl: optional('DEEPSEEK_BASE_URL', 'https://api.deepseek.com/v1'),
   deepseekModel: optional('DEEPSEEK_MODEL', 'deepseek-chat'),

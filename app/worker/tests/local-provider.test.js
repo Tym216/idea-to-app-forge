@@ -7,7 +7,7 @@ import { __setTelemetryForTest } from '../src/telemetry.js';
 
 test('local providers require explicit model but no key; cloud key requirements stay enforced', () => {
   for (const [name, port] of [['ollama', 11434], ['lmstudio', 1234]]) {
-    assert.deepEqual(providerProblems({ llmProvider: name }), [`${name.toUpperCase()}_MODEL`]);
+    assert.deepEqual(providerProblems({ llmProvider: name }), [`${name.toUpperCase()}_MODEL 或 LLM_MODEL`]);
     const settings = { llmProvider: name, [`${name}Model`]: 'downloaded-model' };
     assert.deepEqual(providerProblems(settings), []);
     const p = resolveProvider(settings);
@@ -15,7 +15,7 @@ test('local providers require explicit model but no key; cloud key requirements 
     assert.equal(p.requiresKey, false);
     assert.deepEqual(requestHeaders(p.key), { 'Content-Type': 'application/json' });
   }
-  assert.ok(providerProblems({ llmProvider: 'deepseek' }).includes('DEEPSEEK_API_KEY'));
+  assert.ok(providerProblems({ llmProvider: 'deepseek' }).includes('DEEPSEEK_API_KEY 或 LLM_API_KEY'));
   assert.equal(requestHeaders('optional-token').Authorization, 'Bearer optional-token');
 });
 
@@ -24,7 +24,7 @@ test('actual chat uses shared local endpoint with absent or optional auth and no
   try {
     for (const name of ['ollama', 'lmstudio']) {
       for (const key of ['', 'optional-token']) {
-        Object.assign(config, { llmProvider: name, [`${name}Model`]: 'local-model', [`${name}ApiKey`]: key, [`${name}JsonMode`]: 'off', [`${name}BaseUrl`]: 'http://local.test:1234/v1/' });
+        Object.assign(config, { llmModel: '', llmBaseUrl: '', llmApiKey: '', llmJsonMode: '', planTemperature: null, buildTemperature: null, planProviderOptionsRaw: '', buildProviderOptionsRaw: '', llmProvider: name, [`${name}Model`]: 'local-model', [`${name}ApiKey`]: key, [`${name}JsonMode`]: 'off', [`${name}BaseUrl`]: 'http://local.test:1234/v1/' });
         let calls = 0;
         globalThis.fetch = async (url, options) => {
           calls++;
@@ -43,16 +43,16 @@ test('actual chat uses shared local endpoint with absent or optional auth and no
   } finally { Object.assign(config, previous); globalThis.fetch = savedFetch; }
 });
 
-test('DeepSeek thinking is not overridden; protocol consumes only content, reasoning never substitutes final answer', async () => {
+test('DeepSeek defaults to explicit thinking off; protocol consumes only content, reasoning never substitutes final answer', async () => {
   const previous = { ...config }, savedFetch = globalThis.fetch;
   const updates = [];
   __setTelemetryForTest({ tracing: { startActiveObservation: async (_name, fn) => fn({ update: (attrs) => updates.push(attrs) }) } });
   try {
-    Object.assign(config, { llmProvider: 'deepseek', deepseekApiKey: 'test', deepseekModel: 'deepseek-flash', deepseekJsonMode: 'auto' });
+    Object.assign(config, { llmModel: '', llmBaseUrl: '', llmApiKey: '', llmJsonMode: '', planTemperature: null, buildTemperature: null, planProviderOptionsRaw: '', buildProviderOptionsRaw: '', llmProvider: 'deepseek', deepseekApiKey: 'test', deepseekModel: 'deepseek-flash', deepseekJsonMode: 'auto' });
     globalThis.fetch = async (_url, options) => {
       const body = JSON.parse(options.body);
       assert.deepEqual(body.response_format, { type: 'json_object' });
-      assert.ok(!Object.hasOwn(body, 'thinking'));
+      assert.deepEqual(body.thinking, { type: 'disabled' });
       assert.ok(!Object.hasOwn(body, 'tools'));
       assert.ok(!Object.hasOwn(body, 'reasoning_effort'));
       return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: {

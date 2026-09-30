@@ -3,7 +3,7 @@ import { beginModelTurn, beginModelRequest, measureContext } from './task-metric
 import { logger } from './logger.js';
 import { beforeModelCall, currentExecution, assertExecutionActive } from './execution-control.js';
 import { withObservation, mapUsage, captureLlmMessages, captureLlmOutput } from './telemetry.js';
-import { resolveProvider, buildRequestBody, requestHeaders } from './llm-provider.js';
+import { resolveProvider, prepareRequest, normalizeResponse, validateResponse, requestHeaders, parseProviderOptions } from './llm-provider.js';
 import { withProviderRetry, classifyProviderError, retryAfterMs } from './provider-retry.js';
 export { supportsJsonMode, buildRequestBody } from './llm-provider.js';
 
@@ -60,7 +60,11 @@ export async function readModelResponse(response, context) {
   }
 }
 
-export async function chat(messages, { temperature = 0.2, json = false, taskId, purpose = 'unspecified', contextParts } = {}) {
+export async function chat(messages, options = {}) {
+  return (await chatResponse(messages, options)).text;
+}
+
+export async function chatResponse(messages, { temperature = 0.2, json = false, taskId, purpose = 'unspecified', contextParts, reasoningMode = 'off', reasoningPolicy = 'best_effort', interactionMode = 'structured_text' } = {}) {
   await beforeModelCall();
   const provider = resolveProvider(config);
   if (provider.requiresKey && !provider.key) {
@@ -69,15 +73,23 @@ export async function chat(messages, { temperature = 0.2, json = false, taskId, 
   if (!provider.model) throw new Error(`请在 Worker 环境中填写 ${config.llmProvider.toUpperCase()}_MODEL。`);
 
   const contextChars = measureContext(messages, contextParts);
-  const body = buildRequestBody({
+  const stage = ['plan', 'design'].includes(purpose) ? 'plan'
+    : ['build_decision', 'action_plan'].includes(purpose) ? 'build' : null;
+  const stageTemperature = stage === 'plan' ? config.planTemperature : stage === 'build' ? config.buildTemperature : null;
+  const rawOptions = stage === 'plan' ? config.planProviderOptionsRaw : stage === 'build' ? config.buildProviderOptionsRaw : '';
+  const nativeOptions = parseProviderOptions(rawOptions, `${stage?.toUpperCase() || 'LLM'}_PROVIDER_OPTIONS`);
+  const { body, capability } = prepareRequest({
+    reasoningMode, reasoningPolicy, interactionMode, reasoningProfile: config.llmReasoningProfile, nativeOptions,
     providerName: config.llmProvider,
     model: provider.model,
     messages,
-    temperature,
+    temperature: stageTemperature ?? temperature,
     json,
     jsonMode: provider.jsonMode,
     upstream: config.openrouterUpstream,
   });
+
+  for (const warning of capability.warnings) logger.warn('llm.capability', { provider: provider.name, model: provider.model, warning });
 
   // 调试开关打开时记录脱敏后的模型输入输出;默认只记录元数据与 usage。
   const traceInput = captureLlmMessages(messages);
@@ -91,7 +103,7 @@ export async function chat(messages, { temperature = 0.2, json = false, taskId, 
       model: provider.model,
       ...(traceInput !== undefined ? { input: traceInput } : {}),
       metadata: { provider: config.llmProvider, json, task_id: taskId ?? null, purpose, context_chars: contextChars,
-        logical_call_id: logicalCallId, attempt },
+        logical_call_id: logicalCallId, attempt, capability },
     },
     'generation',
     async (obs) => {
@@ -134,11 +146,12 @@ export async function chat(messages, { temperature = 0.2, json = false, taskId, 
       }
 
       assertExecutionActive();
-      const content = payload?.choices?.[0]?.message?.content;
+      const normalized = normalizeResponse(payload);
+      const content = normalized.text;
       const ms = Math.max(0, performance.now() - started);
-      const { usageDetails, breakdown } = mapUsage(payload?.usage);
+      const { usageDetails, breakdown } = mapUsage(normalized.usage?.details);
       recordedUsage = usageDetails;
-      if (typeof content !== 'string' || !content.trim()) {
+      try { validateResponse(normalized, interactionMode); } catch (validationError) {
         const details = responseDiagnostics(payload);
         obs.update({
           model: payload?.model || provider.model,
@@ -152,7 +165,8 @@ export async function chat(messages, { temperature = 0.2, json = false, taskId, 
         });
         logger.warn('llm.invalid_response', { taskId, provider: config.llmProvider, model: provider.model, ms, ...details, usage: usageDetails });
         const error = new Error(`LLM ${config.llmProvider} 未返回可用文本（finish_reason=${details.finish_reason}, content=${details.content_type}, reasoning=${details.has_reasoning}）。请查看模型响应记录。`);
-        error.code = 'LLM_INVALID_RESPONSE';
+        error.code = validationError.code;
+        if (validationError.code === 'LLM_INTERACTION_MISMATCH') error.message = validationError.message;
         throw error;
       }
       const traceOutput = captureLlmOutput(content);
@@ -177,7 +191,7 @@ export async function chat(messages, { temperature = 0.2, json = false, taskId, 
       status = 'succeeded';
       request.finish(status, recordedUsage);
       await currentExecution()?.onModelEvent?.({ event: 'finished', model: provider.model, ms, chars: content.length, usage: usageDetails });
-      return content;
+      return normalized;
       } catch (error) {
         failureCode = typeof error?.code === 'string' ? error.code : 'ERROR';
         obs.update({ metadata: { error_classification: classifyProviderError(error) } });
@@ -194,7 +208,7 @@ export async function chat(messages, { temperature = 0.2, json = false, taskId, 
     }
   ), {
     signal: currentExecution()?.signal,
-    timeoutMs: LLM_REQUEST_TIMEOUT_MS,
+    timeoutMs: config.llmTimeoutMs ?? LLM_REQUEST_TIMEOUT_MS,
     beforeAttempt: async (attempt) => { if (attempt > 1) await beforeModelCall(); else assertExecutionActive(); },
     onRetry: async (details) => {
       logger.warn('llm.retry_scheduled', { taskId, logical_call_id: logicalCallId, provider: config.llmProvider, model: provider.model, ...details });

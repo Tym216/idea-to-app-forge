@@ -6,7 +6,7 @@ import { envFileLoaded } from './env.js';
 import { createClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
 import { config } from './config.js';
-import { PROVIDERS, resolveProvider, buildRequestBody, requestHeaders } from './llm-provider.js';
+import { PROVIDERS, resolveProvider, buildRequestBody, requestHeaders, providerProblems } from './llm-provider.js';
 
 const env = (name) => (process.env[name] || '').trim();
 const mask = (value) => (!value ? '(空)' : value.length <= 8 ? '****' : `${value.slice(0, 4)}****${value.slice(-4)}`);
@@ -34,6 +34,11 @@ function checkEnv() {
   console.log(envFileLoaded ? '   已加载 app/worker/.env' : '   未找到 app/worker/.env(将只读取进程环境变量)');
 
   const provider = config.llmProvider;
+  for (const problem of providerProblems(config)) {
+    if (/^(PLAN_PROVIDER_OPTIONS|BUILD_PROVIDER_OPTIONS|LLM_TIMEOUT_MS|PLAN_TEMPERATURE|BUILD_TEMPERATURE|PLAN_REASONING_MODE|PLAN_REASONING_POLICY|LLM_REASONING_PROFILE)/.test(problem)) {
+      bad(problem, '检查 app/worker/.env；provider options 必须是完整 JSON 对象，可写成 {} 或多行对象');
+    }
+  }
   const spec = PROVIDERS[provider];
   const llmKeyName = spec ? `${spec.prefix}_API_KEY` : null;
   if (!spec) bad('LLM_PROVIDER 无效', `可选 ${Object.keys(PROVIDERS).join(' / ')}`);
@@ -55,8 +60,10 @@ function checkEnv() {
   ];
 
   for (const [name, hint, secret] of required) {
-    const value = env(name);
-    if (value) ok(`${name} = ${secret ? mask(value) : value}`);
+    const fromGenericKey = name === llmKeyName && !env(name) && env('LLM_API_KEY');
+    const label = fromGenericKey ? 'LLM_API_KEY' : name;
+    const value = fromGenericKey || env(name);
+    if (value) ok(`${label} = ${secret ? mask(value) : value}`);
     else bad(`${name} 未配置`, `在 app/worker/.env 填写;获取位置:${hint}`);
   }
 
@@ -101,6 +108,7 @@ async function checkSupabase() {
 
 async function checkLlm({ provider, llmKeyName }) {
   console.log(`\n[3/4] 大模型(${provider})`);
+  if (providerProblems(config).length) return skip('LLM 配置无效,跳过真实模型请求');
   if (!llmKeyName) return skip('供应商配置无效,跳过');
   let selected;
   try { selected = resolveProvider(config); }

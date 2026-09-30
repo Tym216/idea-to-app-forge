@@ -6,6 +6,8 @@ process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-placeholder';
 process.env.DEEPSEEK_API_KEY = 'sk-testsecretkey1234567890';
 process.env.DEEPSEEK_MODEL = "deepseek-chat"; // 固定 mock 模型，不继承开发者 .env
 process.env.LLM_PROVIDER = 'deepseek';
+// Fake provider tests must not inherit the developer's generic overrides.
+for (const key of ['LLM_MODEL', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_JSON_MODE', 'PLAN_TEMPERATURE', 'BUILD_TEMPERATURE', 'PLAN_PROVIDER_OPTIONS', 'BUILD_PROVIDER_OPTIONS']) process.env[key] = '';
 process.env.LANGFUSE_CAPTURE_CONTENT = 'false';
 
 const tel = await import('../src/telemetry.js');

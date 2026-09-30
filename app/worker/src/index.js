@@ -1,5 +1,6 @@
 import { config, assertRunnable } from './config.js';
 import { logger } from './logger.js';
+import { describeLlm, inspectModelList } from './doctor-llm.js';
 // config.js 已先加载 .env,之后才初始化观测
 import { initTelemetry, traceTask, shutdownTelemetry } from './telemetry.js';
 import { withExecutionControl, monitorExecution, isSupabaseError } from './execution-control.js';
@@ -155,6 +156,16 @@ async function main() {
     process.exitCode = 1;
     return;
   }
+  const llmReport = describeLlm(config);
+  const modelCheck = await inspectModelList(llmReport.selected);
+  if (['auth_error', 'not_listed', 'http_error', 'network_error'].includes(modelCheck.status)) {
+    logger.error('worker.llm_preflight_failed', { provider: llmReport.selected.name, model: llmReport.selected.model,
+      status: modelCheck.status, httpStatus: modelCheck.httpStatus ?? null, reason: modelCheck.reason ?? null,
+      hint: '检查 API Key、模型 ID 与网络后运行 npm run doctor:llm' });
+    process.exitCode = 1;
+    return;
+  }
+  if (modelCheck.status === 'unknown') logger.warn('worker.llm_model_unconfirmed', { provider: llmReport.selected.name, model: llmReport.selected.model, reason: modelCheck.reason || '模型列表接口不可用' });
   ({ claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease } = await import('./supabase.js'));
   ({ executeTask } = await import('./agent.js'));
   ({ admin } = await import('./supabase.js'));

@@ -91,14 +91,14 @@ export function validateAction(plan) {
 }
 
 /** 调用模型并校验;失败把错误反馈给模型重试一次,仍失败抛错(不使用默认值)。 */
-export async function generateStructured({ chat, system, context, validate, taskId, code, purpose = 'plan', contextParts }) {
+export async function generateStructured({ chat, system, context, validate, taskId, code, purpose = 'plan', contextParts, reasoningMode = 'off', reasoningPolicy = 'best_effort' }) {
   const messages = [
     { role: 'system', content: system },
     { role: 'user', content: context },
   ];
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const raw = await chat(messages, { json: true, temperature: 0.3, taskId, purpose, contextParts: { user: contextParts } });
+    const raw = await chat(messages, { json: true, temperature: 0.3, reasoningMode, reasoningPolicy, interactionMode: 'structured_text', taskId, purpose, contextParts: { user: contextParts } });
     try {
       return validate(parseJson(raw));
     } catch (error) {

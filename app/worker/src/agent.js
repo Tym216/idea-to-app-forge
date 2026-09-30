@@ -76,7 +76,7 @@ ${VERIFY_SPEC}
 export async function runPlan(task, context, design, deps = defaultDeps) {
   await deps.updateTask(task.id, { phase: 'planning' });
   const plan = await generateStructured({
-    chat: deps.chat, system: PLAN_PROMPT, context, validate: validatePlan, taskId: task.id, code: 'PLAN_INVALID', purpose: 'plan', contextParts: task.contextParts,
+    chat: deps.chat, system: PLAN_PROMPT, context, validate: validatePlan, taskId: task.id, code: 'PLAN_INVALID', purpose: 'plan', reasoningMode: config.planReasoningMode, reasoningPolicy: config.planReasoningPolicy, contextParts: task.contextParts,
   });
   const saved = await deps.savePlan(task, 'plan', { ...plan, designLayout: design?.layout?.type });
   await deps.appendStep(task, { tool: 'plan', phase: 'awaiting_review', observation: `计划 v${saved.version} 已生成,等待你审阅` });
@@ -311,7 +311,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
     if (task.aborted) throw new AgentStopError('ABORTED', task.aborted);
     task.current_tool = null;
     await ctx.deps.updateTask(task.id, { phase: 'deciding' });
-    const raw = await ctx.deps.chat(history, { temperature: 0.1, json: true, taskId: task.id,
+    const raw = await ctx.deps.chat(history, { temperature: 0.1, json: true, reasoningMode: 'off', interactionMode: 'json_action', taskId: task.id,
       purpose: 'build_decision', contextParts: {
         system: { plan_and_acceptance: options.planChars || 0, instructions: history[0].content.length - (options.planChars || 0) },
         user: task.contextParts,
