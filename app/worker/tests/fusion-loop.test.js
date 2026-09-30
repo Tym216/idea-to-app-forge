@@ -83,7 +83,7 @@ test('insufficient budget stops BEFORE whole batch; auto validation also respect
   const automatic = setup([{ tool: 'build', args: {} }]);
   automatic.task.tool_steps = 39;
   await assert.rejects(automatic.run(), { code: 'TOOL_STEP_LIMIT' });
-  assert.ok(automatic.calls.includes(BUILD_CMD));
+  assert.ok(!automatic.calls.includes(BUILD_CMD)); // Reserve known start+verify before build.
   assert.ok(!automatic.calls.includes('start'));
 });
 
@@ -107,6 +107,8 @@ test('build failure never starts preview; browser failure stops without another 
     assert.equal(failedVerify.task.plan.find((stage) => stage.key === 'build').status, 'done');
     assert.equal(failedVerify.task.plan.find((stage) => stage.key === 'edit').status, 'done');
     assert.equal(failedVerify.task.plan.find((stage) => stage.key === 'verify').status, 'failed');
+    assert.equal(failedVerify.task.steps.find((s) => s.tool === 'build' && s.event === 'finished').ok, true);
+    assert.equal(failedVerify.task.steps.find((s) => s.tool === 'verify' && s.event === 'finished').ok, false);
   }
 });
 
@@ -123,4 +125,25 @@ test('successful verification followed by a write invalidates finish; requires f
     { tool: 'request_plan_revision', args: { reason: '停止' } }]);
   await assert.rejects(f.run(), { code: 'PLAN_REVISION_REQUIRED' });
   assert.ok(f.task.steps.some((s) => s.tool === 'finish' && /不能 finish/.test(s.observation)));
+});
+
+test('write is running until sandbox, database and journal confirm the side effect', async () => {
+  const f = setup([{ tool: 'apply_changes', args: { changes: [change('src/App.tsx')], after: 'none' } }]);
+  let statusDuringWrite;
+  f.sandbox.writeFile = async () => {
+    statusDuringWrite = f.task.plan.find((stage) => stage.key === 'edit').status;
+    throw new Error('write failed after intent');
+  };
+  await assert.rejects(f.run(), { code: 'CHANGE_UNCERTAIN' });
+  assert.equal(statusDuringWrite, 'running');
+  assert.equal(f.task.plan.find((stage) => stage.key === 'edit').status, 'failed');
+  assert.ok(!f.task.steps.some((s) => s.tool === 'write_file' && s.event === 'finished' && s.ok === true));
+});
+
+test('no-op write is not a new code revision and cannot buy another verify attempt', async () => {
+  const f = setup([{ tool: 'apply_changes', args: { changes: [change('src/App.tsx', 'old')], after: 'build' } }]);
+  f.task.steps = [{ tool: 'verify_attempt', event: 'started' }];
+  await assert.rejects(f.run(), { code: 'VERIFY_REVISION_UNCHANGED' });
+  assert.equal(f.calls.filter((call) => call === 'verify').length, 0);
+  assert.equal(f.task.steps.filter((step) => step.tool === 'verify_attempt').length, 1);
 });

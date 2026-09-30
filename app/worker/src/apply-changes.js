@@ -55,6 +55,7 @@ export async function applyChanges({ task, sandbox, sandboxId, changes, deps, be
     // No side effect before baseline reads and durable intent are confirmed.
     const databaseContent = files.find((file) => file.path === change.path)?.content ?? null;
     const sandboxContent = await readCurrent(sandbox, sandboxId, change.path);
+    const codeChanged = sandboxContent !== change.content;
     await deps.checkLease();
     const intent = {
       tool: 'change_journal', event: 'intent', phase: 'edit', operation_id: operationId,
@@ -72,8 +73,8 @@ export async function applyChanges({ task, sandbox, sandboxId, changes, deps, be
       await deps.checkLease();
       await deps.appendStep(task, { tool: 'change_journal', event: 'resolved', phase: 'edit', operation_id: operationId,
         path: change.path, state: 'succeeded', observation: `已确认写入 ${change.path}` });
-      await onWriteSuccess(index, change);
-      operations.push({ index, kind: 'write_file', path: change.path, status: 'succeeded' });
+      await onWriteSuccess(index, change, codeChanged);
+      operations.push({ index, kind: 'write_file', path: change.path, status: 'succeeded', code_changed: codeChanged });
     } catch (error) {
       const stopped = new AgentStopError('CHANGE_UNCERTAIN', `写入 ${change.path} 未确认；恢复前必须核对沙箱和数据库，不自动重试`);
       stopped.operations = [...operations, { index, kind: 'write_file', path: change.path, status: 'uncertain' },

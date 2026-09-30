@@ -7,7 +7,7 @@ import { chat, parseJson } from './llm.js';
 import { getSandboxProvider } from './sandbox/index.js';
 import { SCAFFOLD_FILES } from './scaffold.js';
 import { loadMemories, renderMemories, extractMemories, upsertMemory } from './memory.js';
-import { AgentStopError, BuildProgress, mayModifyCode, verificationAttempts, requireVerificationBudget, MAX_VERIFY_ATTEMPTS } from './build-progress.js';
+import { AgentStopError, BuildProgress, mayModifyCode, verificationAttempts, requireVerificationBudget, requireNewRevisionForVerification, MAX_VERIFY_ATTEMPTS } from './build-progress.js';
 import { DESIGN_TOKENS_PATH, renderDesignPrompt, renderDesignTokensCss, resolveDesign } from './design.js';
 import { checkSandboxDependencies } from './deps-check.js';
 import { VERIFY_SPEC, validateChecks, runVerification, classifyResult, formatObservation, composeSummary } from './verify.js';
@@ -149,7 +149,8 @@ async function runTool(ctx, tool, args) {
       if (tool === 'apply_changes' && !ctx.fusionEnabled) return { observation: 'Action Fusion 未启用，请使用单文件工具。', ok: false };
       const input = tool === 'write_file' ? { changes: [{ operation: 'write', path: args.path, content: args.content ?? '' }], after: 'none' } : args;
       const { changes, after } = validateChanges(input, { maxFiles: config.fusionMaxFiles, maxBytes: config.fusionMaxBytes });
-      const extra = changes.length - 1 + (after === 'build' ? 1 : 0);
+      // Reserve all deterministic child actions before the first file write.
+      const extra = changes.length - 1 + (after === 'build' ? 1 + automaticValidationSteps(ctx) : 0);
       if (task.tool_steps + extra > config.maxToolSteps) throw new AgentStopError('TOOL_STEP_LIMIT', '预算不足以执行这组修改；尚未写入任何文件');
       let result;
       try { result = await applyChanges({ task, sandbox, sandboxId, changes, deps: ctx.deps,
@@ -158,15 +159,17 @@ async function runTool(ctx, tool, args) {
           assertExecutionActive();
           if (index > 0) consumeStep(ctx);
           task.current_tool = { tool: 'write_file', path: filePath, started: performance.now() };
-          applyToolResult(task.plan, 'write_file', true);
+          ctx.lastWriteChanged = false;
+          // A started write is not a successful write; mark done only after journal resolution.
           markRunning(task.plan, 'write_file');
           recordOperation('write_file');
           if (tool === 'apply_changes') await ctx.deps.appendStep(task, { tool: 'write_file', event: 'started', phase: 'write_file', path: filePath, observation: `正在写入 ${filePath}` });
         },
-        onWriteSuccess: async (_index, change) => {
+        onWriteSuccess: async (_index, change, codeChanged) => {
+          ctx.lastWriteChanged = codeChanged;
           applyToolResult(task.plan, 'write_file', true);
           if (tool === 'apply_changes') await ctx.deps.appendStep(task, { tool: 'write_file', event: 'finished', phase: 'write_file', path: change.path,
-            ok: true, ms: Math.round(Math.max(0, performance.now() - task.current_tool.started)), observation: `已写入 ${change.path}（${change.content.length} 字符）` });
+            ok: true, code_changed: codeChanged, ms: Math.round(Math.max(0, performance.now() - task.current_tool.started)), observation: `已写入 ${change.path}（${change.content.length} 字符）` });
         },
       }); } catch (error) {
         if (after === 'build' && error.operations) error.operations.push({ kind: 'build', status: 'not_run' });
@@ -191,6 +194,8 @@ async function runTool(ctx, tool, args) {
       return { observation: JSON.stringify(result), ok: true };
     }
     case 'delete_file': {
+      const existing = await sandbox.listFiles(sandboxId, sandbox.workdir);
+      ctx.lastDeleteChanged = existing.includes(args.path);
       await sandbox.exec(sandboxId, `rm -f ${JSON.stringify(args.path)}`, { timeoutMs: 20000 });
       await ctx.deps.deleteFile(task, args.path);
       progress.invalidate();
@@ -202,6 +207,10 @@ async function runTool(ctx, tool, args) {
       return { observation: formatResult(result), ok: result.exitCode === 0 };
     }
     case 'build': {
+      // A known start+verify pipeline must fit before spending a build side effect.
+      if (task.tool_steps + automaticValidationSteps(ctx) > config.maxToolSteps) {
+        throw new AgentStopError('TOOL_STEP_LIMIT', '预算不足以完成构建后的启动与验收；尚未执行构建');
+      }
       const depsGate = await checkSandboxDependencies(sandbox, sandboxId);
       if (depsGate) return { observation: depsGate, ok: false };
       const result = await runCommand(sandbox, sandboxId, BUILD_CMD);
@@ -244,6 +253,7 @@ async function runTool(ctx, tool, args) {
       const checks = ctx.acceptance.filter((a) => a.steps?.length).map(({ id, steps }) => ({ id, steps }));
       const validated = validateChecks(ctx.acceptance, checks);
       requireVerificationBudget(task);
+      requireNewRevisionForVerification(task);
       const attempt = verificationAttempts(task.steps) + 1;
       await ctx.deps.appendStep(task, { tool: 'verify_attempt', phase: 'verify', event: 'started',
         observation: `第 ${attempt}/${MAX_VERIFY_ATTEMPTS} 次浏览器验收；失败后等待用户决定，不自动修复` });
@@ -274,7 +284,6 @@ async function runTool(ctx, tool, args) {
  * - 构建修复轮数上限 config.maxFixRounds(二者分别配置)
  */
 export async function runBuild(task, project, sandbox, sandboxId, context, deps = defaultDeps, designPrompt = '', acceptance = [], options = {}) {
-  requireVerificationBudget(task);
   let canonicalAcceptance;
   try { canonicalAcceptance = validateAcceptance(acceptance); }
   catch (error) { throw new AgentStopError('PLAN_REVISION_REQUIRED', `验收检查缺失或无效,请创建新 Plan 并审阅: ${error.message}`); }
@@ -362,6 +371,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
 
     let observation;
     let ok;
+    let parentSucceeded = false;
     markRunning(stages, tool);
     const started = performance.now();
     task.current_tool = { tool, started };
@@ -371,10 +381,11 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
     try {
       ({ observation, ok } = await withObservation(`tool.${tool}`, { metadata: { tool } }, 'tool', async (obs) => {
         const r = await executeOperation(ctx, tool, args, false);
+        parentSucceeded = r.ok;
         if (tool === 'build' && r.ok) {
           const validation = await advanceValidation(ctx);
           r.observation += '\n' + validation.observation;
-          r.ok = validation.ok;
+          // Child validation is separately recorded; it cannot rewrite the successful build fact.
         }
         obs.update({
           ...(r.ok ? {} : { level: 'WARNING', statusMessage: redact(r.observation, 300) }),
@@ -388,11 +399,13 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
       if (error?.code === 'LEASE_LOST' || isSupabaseError(error)) throw error;
       if (error instanceof AgentStopError) {
         // Automatic child failure must not relabel successful writes/build as failed.
-        if (task.current_tool?.tool === tool || error.code === 'CHANGE_UNCERTAIN') {
+        if (!parentSucceeded && (task.current_tool?.tool === tool || error.code === 'CHANGE_UNCERTAIN')) {
           applyToolResult(stages, tool, false, error.message.slice(0, 120));
         }
-        await ctx.deps.appendStep(task, { tool, phase: 'stopped', event: 'finished', ok: false,
-          ms: Math.max(0, performance.now() - started), observation: error.message, ...(error.operations ? { result: { status: error.code === 'CHANGE_UNCERTAIN' ? 'uncertain' : 'partial', operations: error.operations } } : {}) });
+        // A child verification failure stops the workflow, but the completed parent build remains successful.
+        await ctx.deps.appendStep(task, { tool, phase: parentSucceeded ? tool : 'stopped', event: 'finished', ok: parentSucceeded,
+          ms: Math.max(0, performance.now() - started), observation: parentSucceeded ? '构建成功；后续校验停止：' + error.message : error.message,
+          ...(error.operations ? { result: { status: error.code === 'CHANGE_UNCERTAIN' ? 'uncertain' : 'partial', operations: error.operations } } : {}) });
         throw error;
       }
       observation = `工具执行失败: ${String(error).slice(0, 2000)}`;
@@ -419,6 +432,9 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
     await ctx.deps.appendStep(task, {
       tool, phase: !ok && ['build', 'verify'].includes(tool) && task.fix_rounds > 0 ? 'fixing' : tool,
       event: 'finished', path: activityPath,
+      ...(tool === 'write_file' ? { code_changed: ctx.lastWriteChanged === true } : {}),
+      ...(tool === 'delete_file' ? { code_changed: ctx.lastDeleteChanged === true } : {}),
+      ...(tool === 'run_command' ? { modifies_code: mayModifyCode(args.command) } : {}),
       ok, ms: Math.max(0, performance.now() - started), observation: observation.slice(0, 1500),
     });
     history.push({ role: 'user', content: `观察结果:\n${observation.slice(0, 6000)}` });
@@ -481,9 +497,13 @@ async function executeOperation(ctx, tool, args, automatic) {
   }
 }
 
+function automaticValidationSteps(ctx) {
+  return ctx.fusionEnabled && ctx.runtimePolicy.workflow === 'web_app'
+    && JSON.stringify(ctx.runtimePolicy.afterBuildSuccess) === JSON.stringify(['start_dev', 'verify']) ? 2 : 0;
+}
+
 async function advanceValidation(ctx) {
-  if (!ctx.fusionEnabled || ctx.runtimePolicy.workflow !== 'web_app'
-    || JSON.stringify(ctx.runtimePolicy.afterBuildSuccess) !== JSON.stringify(['start_dev', 'verify'])) return { ok: true, observation: '', operations: [] };
+  if (!automaticValidationSteps(ctx)) return { ok: true, observation: '', operations: [] };
   let start;
   try {
     start = await executeOperation(ctx, 'start_dev', {}, true);
@@ -574,7 +594,6 @@ export async function resolveBuildBasis(task, context, deps) {
 }
 
 export async function executeTask(task) {
-  if (task.mode === 'build') requireVerificationBudget(task);
   const deps = { ...defaultDeps, getPlan, listFeedback, checkLease: () => ensureLease(task.id) };
   // Reconcile against the ORIGINAL sandbox before hydration or spending more model tokens.
   if (task.mode === 'build') {

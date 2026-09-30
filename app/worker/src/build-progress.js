@@ -14,21 +14,38 @@ export class AgentStopError extends Error {
 }
 
 export const MAX_VERIFY_ATTEMPTS = 2;
+// Old rows lack verify_attempt; count only a completed browser result, not rejected arguments.
+const legacyVerification = (step) => step.tool === 'verify' && step.event === 'finished'
+  && /验收通过|验收未通过|验收工具故障|浏览器验收/.test(step.observation || '');
 /** 以持久化的开始记录计数，暂停/恢复不能清零；兼容旧版的完成记录。 */
 export function verificationAttempts(steps = []) {
   let count = 0;
   let marked = false;
   for (const step of steps || []) {
     if (step.tool === 'verify_attempt') { count++; marked = true; }
-    else if (!marked && step.tool === 'verify' && step.event === 'finished') count++;
+    else if (!marked && legacyVerification(step)) count++;
   }
   return count;
 }
 
+/** Budget limits the expensive verification itself, never the repair path. */
 export function requireVerificationBudget(task) {
   if (verificationAttempts(task.steps) >= MAX_VERIFY_ATTEMPTS) {
     throw new AgentStopError('VERIFY_ATTEMPT_LIMIT', '本任务已用完两次浏览器验收机会。代码与预览保留；请检查验收定义或修订计划后开始新任务。');
   }
+}
+
+/** A failed check can be repeated only after a confirmed code-changing action. */
+export function requireNewRevisionForVerification(task) {
+  const steps = task.steps || [];
+  const lastAttempt = steps.findLastIndex((step) => step.tool === 'verify_attempt' || legacyVerification(step));
+  if (lastAttempt < 0) return;
+  const changed = steps.slice(lastAttempt + 1).some((step) => step.event === 'finished' && step.ok === true
+    && ['write_file', 'delete_file'].includes(step.tool) && step.code_changed !== false
+    || (step.tool === 'change_journal' && step.event === 'resolved' && step.state === 'succeeded'
+      && step.intended_hash !== step.before_sandbox_hash));
+  // Shell commands can alter files, but their result is not yet synchronized/confirmed as a code revision.
+  if (!changed) throw new AgentStopError('VERIFY_REVISION_UNCHANGED', '上次验收后没有确认的代码修改；不能对同一版本重复验收。请先修复代码，或修订错误的计划。');
 }
 
 const CODE_MODIFYING = /(\bnpm\s+(i|install|add|uninstall|remove|update)\b|\bnpx\b|\byarn\b|\bpnpm\b|\bgit\b|\brm\b|\bmv\b|\bcp\b|\bsed\b|\btee\b|\btouch\b|\bmkdir\b|>|\bpatch\b|\bnode\b)/;

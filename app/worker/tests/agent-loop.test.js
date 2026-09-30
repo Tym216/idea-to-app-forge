@@ -218,18 +218,38 @@ test('浏览器验收第一次失败就停止，保留预览，不自动修复�
   assert.equal(task.plan.find((s) => s.key === 'verify').status, 'failed');
 });
 
-test('用户手动重试保留历史验收计数，第二次后拒绝第三次且不花费模型调用', async () => {
+test('verify budget guards the expensive action, not recovery; a confirmed edit permits second check', async () => {
+  const task = newTask();
+  task.steps = [{ tool: 'verify_attempt', event: 'started' }, { tool: 'write_file', event: 'finished', ok: true }];
+  const deps = fakeDeps([{ tool: 'build', args: {} }, { tool: 'start_dev', args: {} }, verifyAction]);
+  deps.verifyApp = async () => ({ checks: [{ id: 'A1', status: 'fail', reason: '内容缺失' }], base: { blocking: [], warnings: [] } });
+  await assert.rejects(runBuild(task, {}, fakeSandbox(), 's', 'ctx', deps), { code: 'VERIFY_FAILED' });
+  assert.equal(task.steps.filter((s) => s.tool === 'verify_attempt').length, 2);
+
+  let calls = 0;
+  deps.chat = async () => JSON.stringify([
+    { tool: 'write_file', args: { path: 'src/App.tsx', content: 'fixed' } },
+    { tool: 'build', args: {} }, { tool: 'start_dev', args: {} }, verifyAction,
+  ][calls++]);
+  task.tool_steps = 0; // RPC resume resets tool steps but preserves verification attempts.
+  const sandbox = fakeSandbox();
+  await assert.rejects(runBuild(task, {}, sandbox, 's', 'ctx', deps), { code: 'VERIFY_ATTEMPT_LIMIT' });
+  assert.equal(calls, 4);
+  assert.ok(sandbox.calls.includes('write:src/App.tsx'));
+  assert.equal(task.steps.filter((s) => s.tool === 'verify_attempt').length, 2);
+});
+
+test('same code revision cannot spend another verify attempt', async () => {
   const task = newTask();
   task.steps = [{ tool: 'verify_attempt', event: 'started' }];
   const deps = fakeDeps([{ tool: 'build', args: {} }, { tool: 'start_dev', args: {} }, verifyAction]);
-  deps.verifyApp = async () => ({ checks: [{ id: 'A1', status: 'fail', reason: '选择器错误' }], base: { blocking: [], warnings: [] } });
-  await assert.rejects(runBuild(task, {}, fakeSandbox(), 's', 'ctx', deps), { code: 'VERIFY_FAILED' });
-  assert.equal(task.steps.filter((s) => s.tool === 'verify_attempt').length, 2);
-  let calls = 0;
-  deps.chat = async () => { calls++; return '{}'; };
-  task.tool_steps = 0; // 模拟 RPC 恢复清零工具预算，但 steps 仍然保留
-  await assert.rejects(runBuild(task, {}, fakeSandbox(), 's', 'ctx', deps), { code: 'VERIFY_ATTEMPT_LIMIT' });
-  assert.equal(calls, 0);
+  let verifyCalls = 0;
+  deps.verifyApp = async () => { verifyCalls++; return verify; };
+  const sandbox = fakeSandbox();
+  await assert.rejects(runBuild(task, {}, sandbox, 's', 'ctx', deps), { code: 'VERIFY_REVISION_UNCHANGED' });
+  assert.ok(sandbox.calls.includes(BUILD_CMD));
+  assert.equal(verifyCalls, 0);
+  assert.equal(task.steps.filter((s) => s.tool === 'verify_attempt').length, 1);
 });
 
 test('手动重试上下文携带最近的验收失败，不要求重新生成全部应用', () => {
