@@ -24,6 +24,10 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
   const Icon = STATE_ICON[state];
   const stages = stagesOf(current);
   const err = current?.status === 'failed' ? parseTaskError(current.error) : null;
+  type VerifyIssue = { id: string; status: string; reason?: string; stepResults?: Array<{ index: number; op: string; ok: boolean; expected?: unknown; actual?: unknown; observed?: unknown }> };
+  const report = current?.steps?.findLast((s) => s.tool === 'verify_report')?.result as { kind?: string; items?: VerifyIssue[] } | undefined;
+  const issues = report?.items?.filter((item) => item.status !== 'verified') ?? [];
+  const completedWithWarnings = current?.status === 'succeeded' && current.phase === 'done_with_warnings';
   const recentActivity = current?.steps?.filter((s) => s.event !== 'started').slice(-4) ?? [];
   const verifyCount = current ? verificationAttempts(current) : 0;
   const verifyLimitReached = verifyCount >= 2;
@@ -71,7 +75,7 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
         />
         <div className="min-w-0 flex-1">
           <p className="text-[14px] font-semibold">
-            {STATE_LABEL[state]}
+            {completedWithWarnings ? '已生成 · 验收有待核对项' : STATE_LABEL[state]}
           </p>
           <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px] text-[var(--text-2)]">
             <dt>模式</dt>
@@ -137,6 +141,25 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
             );
           })}
         </ol>
+      )}
+
+      {(completedWithWarnings || (current.status === 'failed' && issues.length > 0)) && (
+        <div role="status" className="rounded-[8px] border border-[var(--line)] p-3 space-y-2 text-[12px]">
+          <p className="font-medium">{completedWithWarnings ? '预览已保留。以下条件未被验证通过；这不代表它们已实现。' : '验收发现明确故障，以下是失败证据。'}</p>
+          <ul className="space-y-2">{issues.map((issue) => (
+            <li key={issue.id} className="border-l-2 border-[var(--accent)] pl-2">
+              <span className="font-medium">{issue.id} · {issue.status === 'blocker' ? '核心故障' : issue.status === 'warning' ? '警告' : '证据不足'}</span>
+              {issue.reason && <p className="whitespace-pre-wrap">{issue.reason}</p>}
+              {issue.stepResults?.filter((step) => !step.ok).map((step) => (
+                <div key={step.index} className="mt-1">
+                  <p>步骤 {step.index} {step.op} · 预期：{String(step.expected ?? '—')} · 结果：{String(step.actual ?? '未知')}</p>
+                  {step.observed && <pre className="mt-1 overflow-auto whitespace-pre-wrap text-[11px]">{JSON.stringify(step.observed, null, 2)}</pre>}
+                </div>
+              ))}
+            </li>
+          ))}</ul>
+          <p className="text-[var(--text-2)]">{completedWithWarnings ? '可以继续使用当前预览；要修复请提交新的 Build 需求，要调整验收定义请切换 Plan 并审阅新版本。' : '代码与预览已保留。可主动恢复或提交修复任务；验收定义有误时请切换 Plan 修订。'}</p>
+        </div>
       )}
 
       {err && (

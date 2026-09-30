@@ -12,9 +12,10 @@ export const MAX_QUESTIONS = 3;
 export const MAX_ACCEPTANCE = 12;
 
 const ACCEPTANCE_RULES = `验收条件 acceptance 规则:
-- 每条是用户可观察的行为:{"id":"A1","action":"在页面上执行什么操作","expect":"预期看到/发生什么","external":false,"steps":[{"op":"expectText","selector":"main","contains":"预期内容"}]}。
+- 每条是用户可观察的行为:{"id":"A1","action":"在页面上执行什么操作","expect":"预期看到/发生什么","external":false,"severity":"core","steps":[{"op":"expectText","selector":"main","contains":"预期内容"}]}。
 - 每项核心需求至少对应一条;必须描述行为结果(例如“添加后列表多出该项”“按方向键后玩家移动一格”),不能只写“页面存在”“按钮可点击”。
 - 只覆盖用户要求的功能,不得添加用户未要求的功能;简单修复只写与本次改动相关的 1-3 条。
+- severity=core 仅用于缺失就无法完成主要流程的行为，detail 用于视觉、文案、精确坐标等；不要把每项都标 core。
 - 依赖真实后端/第三方服务(支付、邮件、外部 API 等)的条目设 "external":true。
 - 条目必须能在浏览器中验证,id 依次为 A1、A2…
 - 验收一旦批准，Build 只能执行其中的 steps；不能重新编写或放宽检查。`;
@@ -22,7 +23,7 @@ const ACCEPTANCE_RULES = `验收条件 acceptance 规则:
 export const PLAN_PROMPT = `你是资深产品工程师。根据用户需求输出实现计划,只输出一个 JSON 对象:
 {"understanding":"一段话复述需求","scope":["功能点"],"flows":["核心用户流程,一步一句"],"rules":["关键交互规则"],
  "storage":"数据保存方式一句话(例如 仅内存 / localStorage / 用户要求的后端)","steps":["实现步骤"],"design":"设计方向一句话",
- "acceptance":[{"id":"A1","action":"操作","expect":"预期结果","external":false,"steps":[{"op":"expectText","selector":"main","contains":"预期内容"}]}],
+ "acceptance":[{"id":"A1","action":"操作","expect":"预期结果","external":false,"severity":"core","steps":[{"op":"expectText","selector":"main","contains":"预期内容"}]}],
  "questions":[{"id":"q1","question":"问题","options":["选项A","选项B"],"recommended":"选项A"}]}
 规则:
 - 只有缺少会影响实现的关键信息时才提问,最多 ${MAX_QUESTIONS} 个;信息充分时 questions 为 []。
@@ -32,7 +33,7 @@ ${ACCEPTANCE_RULES}
 ${PLAN_CHECKS_SPEC}`;
 
 export const ACTION_PROMPT = `你将直接执行构建。用 JSON 输出简短行动计划,只输出 JSON:
-{"understanding":"一句话","steps":["1-6 个简短步骤"],"acceptance":[{"id":"A1","action":"操作","expect":"预期结果","external":false,"steps":[{"op":"expectText","selector":"main","contains":"预期内容"}]}]}
+{"understanding":"一句话","steps":["1-6 个简短步骤"],"acceptance":[{"id":"A1","action":"操作","expect":"预期结果","external":false,"severity":"core","steps":[{"op":"expectText","selector":"main","contains":"预期内容"}]}]}
 ${ACCEPTANCE_RULES}
 ${PLAN_CHECKS_SPEC}`;
 
@@ -48,7 +49,8 @@ export function validateAcceptance(list) {
     if (!/^A\d{1,2}$/.test(id) || seen.has(id)) throw new Error(`acceptance[${i}].id 必须形如 A1 且唯一`);
     seen.add(id);
     if (!nonEmpty(a?.action) || !nonEmpty(a?.expect)) throw new Error(`acceptance[${i}] 缺少 action/expect`);
-    return { id, action: a.action.trim().slice(0, 300), expect: a.expect.trim().slice(0, 300), external: a.external === true, steps: a.steps };
+    if (a.severity != null && !['core', 'detail'].includes(a.severity)) throw new Error(`acceptance[${i}].severity 只能是 core / detail`);
+    return { id, action: a.action.trim().slice(0, 300), expect: a.expect.trim().slice(0, 300), external: a.external === true, severity: a.severity || 'detail', steps: a.steps };
   });
   const checks = acceptance.filter((a) => a.steps != null).map(({ id, steps }) => ({ id, steps }));
   validateChecks(acceptance, checks);

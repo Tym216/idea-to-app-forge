@@ -120,7 +120,7 @@ export class BuildProgress {
   }
 
   recordVerification(result) {
-    this.verification = result?.kind === 'passed' ? result : null;
+    this.verification = ['passed', 'success_with_warnings', 'inconclusive'].includes(result?.kind) ? result : null;
   }
 
   recordVerificationFailure() {
@@ -138,7 +138,7 @@ export class BuildProgress {
   canFinish() {
     if (!this.buildOk) return '尚未成功构建(或构建后又修改了代码),不能 finish。请先 build。';
     if (!this.previewUrl) return '尚未启动开发服务器并取得预览地址,不能 finish。请先 start_dev。';
-    if (!this.verification) return '浏览器验收尚未通过,不能 finish。请先调用 verify 并修复失败项。';
+    if (!this.verification) return '尚未取得浏览器验收结果，不能 finish。请先调用 verify。';
     return '';
   }
 }

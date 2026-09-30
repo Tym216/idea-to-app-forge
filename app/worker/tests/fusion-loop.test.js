@@ -64,6 +64,7 @@ test('same deterministic change: baseline 6 model turns -> fused 2, preserving o
   const snapshot = metricsSnapshot(metrics, 'succeeded');
   assert.equal(snapshot.tool_call_count, 2);
   assert.equal(snapshot.operation_count, 5);
+  assert.equal(snapshot.verify_count, 1);
   assert.equal(snapshot.verify_pass_count, 1);
   assert.equal(fused.task.steps.filter((s) => s.tool === 'write_file' && s.event === 'finished').length, 2);
 });
@@ -100,7 +101,7 @@ test('build failure never starts preview; browser failure stops without another 
   assert.ok(!failedBuild.calls.includes('start'));
   for (const action of [{ tool: 'build', args: {} },
     { tool: 'apply_changes', args: { changes: [change('src/App.tsx')], after: 'build' } }]) {
-    const failedVerify = setup([action], { verification: { ...passed, checks: [{ id: 'A1', status: 'fail', reason: '缺少内容' }] } });
+    const failedVerify = setup([action], { verification: { ...passed, checks: [{ id: 'A1', status: 'fail', reason: '缺少内容' }], base: { blocking: ['页面异常: 核心流程崩溃'], warnings: [] } } });
     await assert.rejects(failedVerify.run(), { code: 'VERIFY_FAILED' });
     assert.equal(failedVerify.modelCalls(), 1);
     assert.ok(failedVerify.calls.includes('start'));

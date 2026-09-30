@@ -96,7 +96,7 @@ test('浏览器验收工具故障立即停止，不继续调用模型或计入�
   await assert.rejects(runBuild(task, {}, fakeSandbox(), 's', 'ctx', deps), { code: 'VERIFY_TOOL_ERROR' });
   assert.equal(calls, 3);
   assert.equal(task.fix_rounds, 0);
-  assert.match(deps.steps.at(-1).observation, /验收工具故障/);
+  assert.match(deps.steps.at(-1).observation, /浏览器验收环境故障/);
 });
 
 test('修复上限:构建持续失败时循环层以 FIX_LIMIT_REACHED 终止,不被工具级 catch 吞掉', async () => {
@@ -127,7 +127,7 @@ test('门槛:未构建拒绝 start_dev 与 finish;构建+预览后 finish 成功
   assert.match(finishedSteps(deps)[0].observation, /尚未成功构建,不能 start_dev/);
   assert.match(finishedSteps(deps)[1].observation, /不能 finish/);
   assert.match(finishedSteps(deps)[3].observation, /尚未启动开发服务器/);
-  assert.match(finishedSteps(deps)[5].observation, /浏览器验收尚未通过/);
+  assert.match(finishedSteps(deps)[5].observation, /尚未取得浏览器验收结果/);
   assert.ok(sandbox.calls.includes('npm install --no-audit --no-fund && npm run build'));
   assert.ok(sandbox.calls.includes(`bg:${DEV_CMD}`));
 });
@@ -160,7 +160,7 @@ test('失效:验收通过后改代码,旧结果不能直接 finish', async () =>
     { tool: 'finish', args: { summary: 'ok' } },
   ]);
   const result = await runBuild(newTask(), {}, fakeSandbox(), 's', 'ctx', deps);
-  assert.match(finishedSteps(deps)[4].observation, /不能 finish/);
+  assert.ok(finishedSteps(deps).some((step) => /不能 finish/.test(step.observation)));
   assert.match(result.summary, /已验证.*A1/);
 });
 
@@ -209,7 +209,7 @@ test('浏览器验收第一次失败就停止，保留预览，不自动修复�
   const deps = fakeDeps([{ tool: 'build', args: {} }, { tool: 'start_dev', args: {} }, verifyAction]);
   let called = 0;
   deps.chat = async () => JSON.stringify(called++ < 2 ? [{ tool: 'build', args: {} }, { tool: 'start_dev', args: {} }][called - 1] : verifyAction);
-  deps.verifyApp = async () => ({ checks: [{ id: 'A1', status: 'fail', reason: '内容缺失' }], base: { blocking: [], warnings: [] } });
+  deps.verifyApp = async () => ({ checks: [{ id: 'A1', status: 'fail', reason: '内容缺失' }], base: { blocking: ['页面异常: 核心流程崩溃'], warnings: [] } });
   await assert.rejects(runBuild(task, {}, fakeSandbox(), 's', 'ctx', deps), (e) => e.code === 'VERIFY_FAILED');
   assert.equal(task.tool_steps, 3);
   assert.equal(called, 3);
@@ -222,7 +222,7 @@ test('verify budget guards the expensive action, not recovery; a confirmed edit 
   const task = newTask();
   task.steps = [{ tool: 'verify_attempt', event: 'started' }, { tool: 'write_file', event: 'finished', ok: true }];
   const deps = fakeDeps([{ tool: 'build', args: {} }, { tool: 'start_dev', args: {} }, verifyAction]);
-  deps.verifyApp = async () => ({ checks: [{ id: 'A1', status: 'fail', reason: '内容缺失' }], base: { blocking: [], warnings: [] } });
+  deps.verifyApp = async () => ({ checks: [{ id: 'A1', status: 'fail', reason: '内容缺失' }], base: { blocking: ['页面异常: 核心流程崩溃'], warnings: [] } });
   await assert.rejects(runBuild(task, {}, fakeSandbox(), 's', 'ctx', deps), { code: 'VERIFY_FAILED' });
   assert.equal(task.steps.filter((s) => s.tool === 'verify_attempt').length, 2);
 
@@ -263,4 +263,30 @@ test('验收定义错误时 Build 请求新计划并停止,不自行改断言', 
   const deps = fakeDeps([{ tool: 'request_plan_revision', args: { reason: 'A1 要求的按钮与用户确认的流程冲突' } }]);
   await assert.rejects(runBuild(newTask(), {}, fakeSandbox(), 's', 'ctx', deps), (e) => e.code === 'PLAN_REVISION_REQUIRED' && /A1/.test(e.message));
   assert.equal(deps.steps.at(-1).phase, 'stopped');
+});
+
+test('非阻断验收失败保留预览并完成带警告任务，不追加修复模型调用', async () => {
+  const task = newTask();
+  const deps = fakeDeps([{ tool: 'build', args: {} }, { tool: 'start_dev', args: {} }, verifyAction]);
+  let calls = 0;
+  deps.chat = async () => JSON.stringify([{ tool: 'build', args: {} }, { tool: 'start_dev', args: {} }, verifyAction][calls++]);
+  deps.verifyApp = async () => ({ base: { blocking: [], warnings: [] },
+    checks: [{ id: 'A1', status: 'fail', reason: '步骤 3 expectTrue: 表达式为假', stepResults: [{ index: 3, op: 'expectTrue', ok: false, actual: 'false' }] }] });
+  const result = await runBuild(task, {}, fakeSandbox(), 's', 'ctx', deps);
+  assert.equal(result.verificationKind, 'success_with_warnings');
+  assert.match(result.summary, /未验证.*A1/);
+  assert.equal(calls, 3);
+  assert.equal(task.steps.find((s) => s.tool === 'verify_report').result.items[0].stepResults[0].actual, 'false');
+});
+
+
+test('manual verify records one attempt and one pass in task metrics', async () => {
+  const { createTaskMetrics, withTaskMetrics } = await import('../src/task-metrics.js');
+  const task = newTask();
+  const deps = fakeDeps([{ tool: 'build', args: {} }, { tool: 'start_dev', args: {} }, verifyAction,
+    { tool: 'finish', args: { summary: '完成' } }]);
+  const metrics = createTaskMetrics(task);
+  await withTaskMetrics(metrics, () => runBuild(task, {}, fakeSandbox(), 's', 'ctx', deps));
+  assert.equal(metrics.verify_count, 1);
+  assert.equal(metrics.verify_pass_count, 1);
 });

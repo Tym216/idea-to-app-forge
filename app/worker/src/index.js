@@ -110,9 +110,9 @@ async function handleTask(task) {
 
   try {
     const result = await Promise.race([run, timeout, interrupted]);
-    await updateTask(task.id, { status: 'succeeded', phase: 'done' });
-    outcome = 'succeeded';
-    logger.info('task.finished', { taskId: task.id, status: 'succeeded', previewUrl: result?.previewUrl });
+    await updateTask(task.id, { status: 'succeeded', phase: ['success_with_warnings', 'inconclusive'].includes(result?.verificationKind) ? 'done_with_warnings' : 'done' });
+    outcome = ['success_with_warnings', 'inconclusive'].includes(result?.verificationKind) ? 'succeeded_with_warnings' : 'succeeded';
+    logger.info('task.finished', { taskId: task.id, status: 'succeeded', verificationKind: result?.verificationKind, previewUrl: result?.previewUrl });
   } catch (error) {
     outcomeError = error;
     // 完成写回在执行上下文之外，仍由原 execution_id 校验；暂停不得被 failed 覆盖。

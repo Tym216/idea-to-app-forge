@@ -29,7 +29,7 @@ export const PLAN_CHECKS_SPEC = `每条非外部验收条件还必须包含 step
 
 export const VERIFY_SPEC = `verify 工具：构建成功、start_dev 后用已批准计划内固定的检查验收应用。
 {"thought":"...","tool":"verify","args":{}}
-检查由 Worker 从计划读取；不得提交 checks、替代断言或选择器。验收失败时修复应用代码，重新 build → start_dev → verify。
+检查由 Worker 从计划读取；不得提交 checks、替代断言或选择器。验收结果有警告或证据不足时停止自动修复，保留当前版本并如实说明；明确 blocker 时也停止，等待用户决定。
 若计划本身有误或与实际架构冲突，调用 request_plan_revision 说明原因，停止本轮 Build，等待用户重新审阅计划。`;
 
 // ------------------------------------------------------------------ 沙箱内 runner(平台代码)
@@ -48,7 +48,8 @@ const T = Math.min(spec.timeoutMs || 5000, 10000);
 const origin = new URL(spec.url).origin;
 const dir = spec.outDir || '.';
 mkdirSync(dir, { recursive: true });
-const CORE = ['document', 'script', 'stylesheet', 'xhr', 'fetch'];
+// API requests may be optional; a failed core action is judged by its own check.
+const CORE = ['document', 'script', 'stylesheet'];
 const safeUrl = (raw) => { try { const u = new URL(raw); return u.origin === origin ? u.pathname : u.origin + u.pathname; } catch { return '[invalid URL]'; } };
 const sameOrigin = (raw) => { try { return new URL(raw).origin === origin; } catch { return false; } };
 
@@ -87,6 +88,27 @@ async function until(page, fn) {
   return last;
 }
 const evalJs = (page, js) => page.evaluate('(() => (' + js + '))()');
+// Snapshot only selectors named by the approved check. Never return DOM or arbitrary attributes.
+async function snapshot(page, steps) {
+  const selectors = new Set();
+  for (const s of steps) {
+    if (s.selector) selectors.add(s.selector);
+    for (const m of String(s.js || '').matchAll(/document\.querySelector\(\s*(['"])(.*?)\1\s*\)/g)) selectors.add(m[2]);
+  }
+  return page.evaluate((list) => ({
+    bodyText: (document.body?.innerText || '').trim().slice(0, 100),
+    elements: list.map((selector) => {
+      try {
+        const el = document.querySelector(selector);
+        return { selector, exists: !!el, ...(el ? {
+          visible: !!(el.getClientRects().length), text: (el.textContent || '').trim().slice(0, 80),
+          row: el.dataset?.row ?? null, col: el.dataset?.col ?? null,
+          disabled: 'disabled' in el ? !!el.disabled : null,
+        } : {}) };
+      } catch { return { selector, exists: false, invalidSelector: true }; }
+    }),
+  }), [...selectors].slice(0, 8)).catch(() => ({ unavailable: true }));
+}
 
 // ---- 基础检查
 const base = { blocking: [], warnings: [] };
@@ -114,6 +136,7 @@ for (const check of spec.checks || []) {
   const { context, page } = await open(sink);
   const saved = {};
   let failed = null;
+  const stepResults = [];
   for (let i = 0; i < check.steps.length && !failed; i += 1) {
     const s = check.steps[i];
     const loc = () => page.locator(s.selector).first();
@@ -146,11 +169,15 @@ for (const check of spec.checks || []) {
         default: r = { ok: false, detail: '未知操作 ' + s.op };
       }
     } catch (e) { r = { ok: false, detail: short(e.message) }; }
+    const observed = await snapshot(page, check.steps);
+    stepResults.push({ index: i + 1, op: s.op, ok: r.ok,
+      ...(s.op.startsWith('expect') ? { expected: s.op === 'expectTrue' ? 'true' : (s.contains ?? s.equals ?? s.min ?? 'condition'), actual: r.ok ? 'matched' : (r.detail || 'false') } : {}),
+      observed });
     if (!r.ok) failed = '步骤 ' + (i + 1) + ' ' + s.op + ': ' + r.detail;
   }
   if (!failed && sink.blocking.length) failed = sink.blocking[0];
   if (failed) await shot(page, 'fail-' + check.id);
-  checks.push({ id: check.id, status: failed ? 'fail' : 'pass', reason: failed || '', warnings: sink.warnings.slice(0, 3) });
+  checks.push({ id: check.id, status: failed ? 'fail' : 'pass', reason: failed || '', blocking: sink.blocking.slice(0, 3), warnings: sink.warnings.slice(0, 3), stepResults: failed ? stepResults : [] });
   await context.close();
 }
 await browser.close();
@@ -257,43 +284,56 @@ export async function runVerification({ sandbox, sandboxId, checks, url = VERIFY
 }
 
 // ------------------------------------------------------------------ 结果分类与反馈
-/**
- * kind: passed | app_failed | blocked | tool_error
- * 外部服务条目:verified(检查通过) / missing_config(未提供检查,生成应用未配置该服务) / unverifiable(检查失败)——
- * 均不计为已验证;核心需求未验证时任务不能完成。
- */
+/** Browser evidence is separate from approved acceptance: failed checks are never relabelled verified. */
 export function classifyResult(result, acceptance) {
   if (!result || result.toolError) return { kind: 'tool_error', toolError: result?.toolError || '验收工具无结果', items: [], base: null };
   const byId = new Map((result.checks || []).map((c) => [c.id, c]));
+  const base = result.base || { blocking: ['缺少基础检查结果'], warnings: [] };
   const items = acceptance.map((a) => {
     const c = byId.get(a.id);
-    if (a.external) {
-      if (!c) return { ...a, status: 'missing_config', reason: '需要外部服务配置,未验证' };
-      return c.status === 'pass' ? { ...a, status: 'verified', reason: '' } : { ...a, status: 'unverifiable', reason: c.reason };
-    }
-    if (!c) return { ...a, status: 'fail', reason: '缺少检查' };
-    return { ...a, status: c.status === 'pass' ? 'verified' : 'fail', reason: c.reason };
+    const shared = { ...a, reason: c?.reason || '', stepResults: c?.stepResults || [] };
+    if (a.external) return { ...shared, status: !c ? 'missing_config' : c.status === 'pass' ? 'verified' : 'unverifiable' };
+    if (!c) return { ...shared, status: 'inconclusive', reason: '缺少检查结果' };
+    if (c.blocking?.length) return { ...shared, status: 'blocker', reason: c.blocking[0] };
+    if (c.status === 'pass') return { ...shared, status: 'verified' };
+    // An explicit false assertion is evidence of unmet approved acceptance, even if
+    // a composite expression does not reveal which subexpression was false.
+    const failedStep = c.stepResults?.find((step) => !step.ok);
+    const disabled = failedStep?.observed?.elements?.some((el) => el.disabled === true);
+    if (a.severity === 'core' && disabled) return { ...shared, status: 'blocker' };
+    const reason = String(c.reason || '');
+    const explicitFailure = /表达式为假|期望包含|expectText.*实际|数量为|元素不可见|元素仍可见|值未变化/.test(reason)
+      || failedStep?.actual === false || failedStep?.actual === 'false';
+    if (explicitFailure) return { ...shared, status: a.severity === 'core' ? 'blocker' : 'warning' };
+    // Locator errors, exceptions and missing observations do not establish a false assertion.
+    return { ...shared, status: 'inconclusive' };
   });
-  const base = result.base || { blocking: ['缺少基础检查结果'], warnings: [] };
-  const failed = base.blocking.length > 0 || items.some((i) => i.status === 'fail');
-  const blocked = items.some((i) => i.status === 'missing_config' || i.status === 'unverifiable');
-  return { kind: failed ? 'app_failed' : blocked ? 'blocked' : 'passed', items, base, screenshots: result.screenshots || [] };
+  const hasBlocker = base.blocking?.length > 0 || items.some((i) => i.status === 'blocker');
+  const hasUncertain = items.some((i) => ['inconclusive', 'missing_config', 'unverifiable'].includes(i.status));
+  const hasWarning = items.some((i) => i.status === 'warning') || base.warnings?.length > 0;
+  return { kind: hasBlocker ? 'blocker' : hasUncertain ? 'inconclusive' : hasWarning ? 'success_with_warnings' : 'passed',
+    items, base, screenshots: result.screenshots || [] };
 }
 
 export function formatObservation(v, round, maxRounds) {
-  if (v.kind === 'tool_error') {
-    return `验收工具故障(不是应用问题,本次不算通过):${v.toolError}\n可稍后重试 verify;不要修改应用代码来规避。`;
-  }
-  const lines = [v.kind === 'passed' ? '验收通过。' : v.kind === 'blocked' ? '验收未完成:所需外部服务缺少配置或无法验证。' : `验收未通过(第 ${round}/${maxRounds} 次浏览器验收):`];
-  for (const b of v.base.blocking.slice(0, 5)) lines.push(`- 基础检查: ${b}`);
+  if (v.kind === 'tool_error') return `浏览器验收环境故障，本次无法判断应用：${v.toolError}`;
+  const heading = { passed: '验收全部通过。', blocker: '核心故障，任务不能标记完成。',
+    inconclusive: '验收证据不足；当前版本可预览，但不能声称所有条件已验证。',
+    success_with_warnings: '应用可预览，验收有警告。' }[v.kind];
+  const lines = [heading, `第 ${round}/${maxRounds} 次浏览器验收`];
+  for (const b of (v.base.blocking || []).slice(0, 3)) lines.push(`- 核心故障: ${b}`);
   for (const i of v.items) {
-    const mark = { verified: '✓', fail: '✗', missing_config: '缺少配置', unverifiable: '无法验证' }[i.status];
+    const mark = { verified: '✓', warning: '警告', blocker: '阻断', inconclusive: '证据不足', missing_config: '缺少配置', unverifiable: '无法验证' }[i.status];
     lines.push(`- ${i.id} ${mark} ${i.action} → ${i.expect}${i.reason ? ` | ${i.reason}` : ''}`);
+    if (i.status !== 'verified') {
+      const failed = i.stepResults.find((step) => !step.ok);
+      if (failed) lines.push(`  步骤 ${failed.index} ${failed.op}: expected=${JSON.stringify(failed.expected ?? null)}, actual=${JSON.stringify(failed.actual ?? null)}, observed=${JSON.stringify(failed.observed).slice(0, 450)}`);
+    }
   }
-  if (v.base.warnings.length) lines.push(`非阻断警告 ${v.base.warnings.length} 条,例如: ${v.base.warnings[0]}`);
-  if (v.kind === 'app_failed') lines.push('已停止自动修复，保留代码和预览。先判断是应用问题还是验收定义错误；只有用户主动重试后才继续。不能删减功能或放宽断言。');
-  if (v.kind === 'blocked') lines.push('请配置外部服务或取得可重复的验证条件;本轮不能标记成功。');
-  return lines.join('\n').slice(0, 2000);
+  if (v.base.warnings?.length) lines.push(`非阻断警告 ${v.base.warnings.length} 条,例如: ${v.base.warnings[0]}`);
+  if (v.kind === 'blocker') lines.push('保留代码和预览，等待用户选择修复或修订验收条件；不自动重试。');
+  else if (v.kind !== 'passed') lines.push('可继续使用当前版本；若要修复，请提交新任务；验收定义有误则通过 Plan 修订后重新批准。未通过项没有被标记为已验证。');
+  return lines.join('\n').slice(0, 3500);
 }
 
 /** 完成摘要:基于实际结果区分 已实现 / 已验证 / 未验证。 */
@@ -303,6 +343,6 @@ export function composeSummary(agentSummary, v) {
   return [
     `已实现(代理说明):${agentSummary}`,
     `已验证(浏览器实际执行):${verified.length ? verified.map((i) => `${i.id} ${i.expect}`).join(';') : '仅基础检查'}`,
-    `未验证:${unverified.length ? unverified.map((i) => `${i.id} ${i.action}(${i.status === 'missing_config' ? '缺少外部服务配置' : '无法验证'})`).join(';') : '无'}`,
+    `未验证:${unverified.length ? unverified.map((i) => `${i.id} ${i.action}(${({ warning: '有警告', inconclusive: '证据不足', missing_config: '缺少外部服务配置', unverifiable: '无法验证', blocker: '核心故障' })[i.status] || '未通过'}${i.reason ? ': ' + i.reason.slice(0, 100) : ''})`).join(';') : '无'}`,
   ].join('\n');
 }

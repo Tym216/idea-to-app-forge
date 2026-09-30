@@ -129,7 +129,7 @@ export function PlanPanel({ plans, feedback, busy, onChanged, actions = { approv
             <h3 className="text-[12px] font-semibold uppercase tracking-[.04em] text-[var(--text-2)] mb-1">验收条件</h3>
             <ol className="space-y-2">{c.acceptance.map((a) => (
               <li key={a.id}>
-                <span className="font-medium">{a.id}</span> · {a.action} → {a.expect}{a.external ? '（需外部服务）' : ''}
+                <span className="font-medium">{a.id}</span> · {a.action} → {a.expect}{a.external ? '（需外部服务）' : a.severity === 'core' ? '（核心流程）' : a.severity === 'detail' ? '（细节检查）' : '（未分级）'}
                 {a.steps?.length ? <details className="mt-1 text-[12px] text-[var(--text-2)]"><summary className="cursor-pointer">查看固定的浏览器检查</summary><pre className="mt-1 overflow-auto whitespace-pre-wrap">{JSON.stringify(a.steps, null, 2)}</pre></details> : null}
               </li>
             ))}</ol>

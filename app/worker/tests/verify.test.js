@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateChecks, classifyResult, parseRunnerOutput, ensureBrowser } from '../src/verify.js';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { validateChecks, classifyResult, parseRunnerOutput, ensureBrowser, RUNNER_SOURCE } from '../src/verify.js';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -27,12 +27,13 @@ test('隐藏的验收目录写入有效包名，安装前不运行会失败的 n
 
 test('只有 Loading 占位内容时,即使构建和页面加载成功也不能通过验收', () => {
   const result = classifyResult({ base: { blocking: ['页面只有占位内容'], warnings: [] }, checks: [{ id: 'A1', status: 'pass' }] }, acceptance);
-  assert.equal(result.kind, 'app_failed');
+  assert.equal(result.kind, 'blocker');
 });
 
-test('核心交互失败不能完成;通过后才是 passed', () => {
+test('未记录明确断言结果时按证据不足处理，绝不伪称已验证', () => {
   const failed = classifyResult({ base, checks: [{ id: 'A1', status: 'fail', reason: '任务未出现' }] }, acceptance);
-  assert.equal(failed.kind, 'app_failed');
+  assert.equal(failed.kind, 'inconclusive');
+  assert.equal(failed.items[0].status, 'inconclusive');
   assert.equal(classifyResult({ base, checks: [{ id: 'A1', status: 'pass' }] }, acceptance).kind, 'passed');
 });
 
@@ -41,10 +42,10 @@ test('浏览器工具故障与应用失败分开报告', () => {
   assert.equal(parseRunnerOutput('no marker').toolError.includes('无结构化输出'), true);
 });
 
-test('外部服务需求未验证不能标记应用成功', () => {
+test('外部服务需求未验证时明确标记证据不足', () => {
   const external = [{ id: 'A1', action: '提交订单', expect: '创建订单', external: true }];
   const result = classifyResult({ base, checks: [] }, external);
-  assert.equal(result.kind, 'blocked');
+  assert.equal(result.kind, 'inconclusive');
   assert.equal(result.items[0].status, 'missing_config');
 });
 
@@ -60,4 +61,41 @@ test('expectChanged 必须先保存同名旧值', () => {
 test('缺少验收条件或检查不得通过', () => {
   assert.throws(() => validateChecks([], []), /缺少已确认/);
   assert.throws(() => validateChecks(acceptance, []), /缺少验收条件 A1/);
+});
+
+test('细节检查的明确 expectTrue=false 是警告；运行时崩溃仍阻断', () => {
+  const uncertain = classifyResult({ base, checks: [{ id: 'A1', status: 'fail', reason: '步骤 3 expectTrue: 表达式为假',
+    stepResults: [{ index: 1, op: 'click', ok: true, observed: { elements: [] } },
+      { index: 3, op: 'expectTrue', ok: false, expected: 'true', actual: 'false', observed: { elements: [{ selector: '[data-testid=steps]', text: '0' }] } }] }] }, acceptance);
+  assert.equal(uncertain.kind, 'success_with_warnings');
+  assert.equal(uncertain.items[0].status, 'warning');
+  assert.equal(uncertain.items[0].stepResults[1].observed.elements[0].text, '0');
+  assert.equal(classifyResult({ base, checks: [{ id: 'A1', status: 'fail', reason: 'x', blocking: ['页面异常: crash'] }] }, acceptance).kind, 'blocker');
+});
+
+test('sandbox runner source parses after adding per-step diagnostics', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forge-runner-check-'));
+  try {
+    const path = join(dir, 'runner.mjs');
+    writeFileSync(path, RUNNER_SOURCE);
+    execFileSync(process.execPath, ['--check', path]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('计划明确标记的核心操作有客观失败证据才阻断；旧计划仍保守分类', () => {
+  const objective = { base, checks: [{ id: 'A1', status: 'fail', reason: '步骤 3 expectText: 期望任务出现,实际为空',
+    stepResults: [{ index: 3, op: 'expectText', ok: false, observed: { elements: [{ selector: '#list', text: '' }] } }] }] };
+  assert.equal(classifyResult(objective, [{ ...acceptance[0], severity: 'core' }]).kind, 'blocker');
+  assert.equal(classifyResult(objective, acceptance).kind, 'success_with_warnings');
+  const composite = { ...objective, checks: [{ ...objective.checks[0], reason: '步骤 3 expectTrue: 表达式为假' }] };
+  assert.equal(classifyResult(composite, [{ ...acceptance[0], severity: 'core' }]).kind, 'blocker');
+  assert.equal(classifyResult(composite, [{ ...acceptance[0], severity: 'detail' }]).kind, 'success_with_warnings');
+});
+
+test('选择器找不到与断言执行异常属于证据不足，不能当作明确 false', () => {
+  const uncertain = classifyResult({ base, checks: [{ id: 'A1', status: 'fail', reason: '步骤 1 click: locator.click: Timeout 5000ms exceeded',
+    stepResults: [{ index: 1, op: 'click', ok: false, observed: { elements: [{ selector: '#missing', exists: false }] } }] }] },
+  [{ ...acceptance[0], severity: 'core' }]);
+  assert.equal(uncertain.kind, 'inconclusive');
+  assert.equal(uncertain.items[0].status, 'inconclusive');
 });

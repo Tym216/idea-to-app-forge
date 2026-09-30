@@ -51,11 +51,11 @@ export type Message = {
   created_at: string;
 };
 
-export type TaskStep = { tool: string; phase: string; observation: string; at: string; ok?: boolean; ms?: number; event?: 'started' | 'finished'; path?: string };
+export type TaskStep = { tool: string; phase: string; observation: string; at: string; ok?: boolean; ms?: number; event?: 'started' | 'finished'; path?: string; result?: unknown };
 export type Stage = { key: string; label: string; status: 'pending' | 'running' | 'done' | 'failed'; note: string };
 
 export type PlanQuestion = { id: string; question: string; options: string[]; recommended?: string };
-export type PlanAcceptance = { id: string; action: string; expect: string; external: boolean; steps?: Array<Record<string, unknown>> };
+export type PlanAcceptance = { id: string; action: string; expect: string; external: boolean; severity?: 'core' | 'detail'; steps?: Array<Record<string, unknown>> };
 
 export type PlanContent = {
   understanding: string;

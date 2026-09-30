@@ -48,3 +48,17 @@ test('offline CLI compares synthetic logs with confirmed outcomes and separates 
     assert.equal(report.groups[1].model_requests, 2);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test('success with warnings counts as success and remains separately visible in KPI', () => {
+  const rows = [
+    { status: 'succeeded', failure_code: null },
+    { status: 'succeeded_with_warnings', failure_code: null },
+    { status: 'failed', failure_code: 'VERIFY_FAILED' },
+  ];
+  const summary = summarizeMetrics(rows);
+  assert.equal(summary.succeeded, 2);
+  assert.equal(summary.succeeded_with_warnings, 1);
+  assert.equal(summary.execution_success_rate, 2 / 3);
+  assert.deepEqual(summary.failures, { VERIFY_FAILED: 1 });
+});

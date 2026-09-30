@@ -68,7 +68,7 @@ ${VERIFY_SPEC}
 - 脚手架已包含 package.json / vite.config.ts / index.html / src/main.tsx,通常只需修改 src 下的业务文件。
 - 新增第三方依赖时,先 write_file 更新 package.json,再 run_command 执行 npm install。
 - 源码 import 的第三方包(含 lucide-react 等图标/组件库)必须已在 package.json 声明,否则 build 会被拦截。
-- 完成代码编写后必须先 build,构建通过后 start_dev,再 verify,验收通过后才 finish;修改代码后需重新 build 和 verify。
+- 完成代码编写后必须先 build,构建通过后 start_dev,再 verify;明确 blocker 阻止完成，其余未通过项必须如实列为警告或证据不足，不得宣称已验证。修改代码后需重新 build 和 verify。
 - 如果计划验收本身有误,调用 request_plan_revision 并说明具体冲突;不能自行改动检查。
 - 只输出一个 JSON 对象,不要输出任何解释文字或 markdown 围栏。`;
 
@@ -261,12 +261,16 @@ async function runTool(ctx, tool, args) {
       const result = classifyResult(raw, ctx.acceptance);
       ctx.verificationResult = result;
       progress.recordVerification(result);
+      await ctx.deps.appendStep(task, { tool: 'verify_report', phase: 'verify',
+        observation: `验收结论: ${result.kind}`, result: { kind: result.kind,
+          items: result.items.map((i) => ({ id: i.id, status: i.status, reason: i.reason,
+            stepResults: i.status === 'verified' ? [] : i.stepResults })) } });
       if (result.kind === 'tool_error') throw new AgentStopError('VERIFY_TOOL_ERROR', formatObservation(result, attempt, MAX_VERIFY_ATTEMPTS));
-      if (result.kind === 'blocked') throw new AgentStopError('VERIFY_BLOCKED', formatObservation(result, attempt, MAX_VERIFY_ATTEMPTS));
-      if (result.kind === 'app_failed') {
+      // Missing external configuration or ambiguous assertions remain unverified in the report.
+      if (result.kind === 'blocker') {
         throw new AgentStopError('VERIFY_FAILED', formatObservation(result, attempt, MAX_VERIFY_ATTEMPTS));
       }
-      return { observation: formatObservation(result, attempt, MAX_VERIFY_ATTEMPTS), ok: result.kind === 'passed' };
+      return { observation: formatObservation(result, attempt, MAX_VERIFY_ATTEMPTS), ok: true };
     }
     case 'request_plan_revision': {
       const reason = String(args.reason || '').trim().slice(0, 500);
@@ -361,7 +365,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
       if (!blocked) {
         const summary = composeSummary(args.summary || '已完成本轮修改。', ctx.verificationResult);
         await ctx.deps.appendStep(task, { tool, phase: 'finishing', observation: summary });
-        return { summary, previewUrl: ctx.previewUrl };
+        return { summary, previewUrl: ctx.previewUrl, verificationKind: ctx.verificationResult?.kind };
       }
       history.push({ role: 'user', content: `观察结果:\n${blocked}` });
       await ctx.deps.appendStep(task, { tool, phase: tool, observation: blocked });
@@ -420,6 +424,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
       throw error;
     }
 
+    // executeOperation already records this verify outcome; do not double count it.
     logger.info('agent.tool', {
       taskId: task.id,
       step: task.tool_steps,
@@ -438,6 +443,11 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
       ok, ms: Math.max(0, performance.now() - started), observation: observation.slice(0, 1500),
     });
     history.push({ role: 'user', content: `观察结果:\n${observation.slice(0, 6000)}` });
+    if (ctx.verificationResult && ['success_with_warnings', 'inconclusive'].includes(ctx.verificationResult.kind)) {
+      const summary = composeSummary('已生成可预览版本，部分验收尚未通过或证据不足。', ctx.verificationResult);
+      await ctx.deps.appendStep(task, { tool: 'finish', phase: 'finishing', observation: summary });
+      return { summary, previewUrl: ctx.previewUrl, verificationKind: ctx.verificationResult.kind };
+    }
 
     if (history.length > 24) history.splice(2, history.length - 20);
   }
@@ -478,7 +488,7 @@ async function executeOperation(ctx, tool, args, automatic) {
       : await runTool(ctx, tool, args);
     assertExecutionActive();
     await ctx.deps.checkLease();
-    recordOperation(tool, result.ok);
+    recordOperation(tool, tool === 'verify' ? ctx.verificationResult?.kind === 'passed' : result.ok);
     if (!['write_file', 'apply_changes'].includes(tool)) {
       applyToolResult(ctx.task.plan, tool, result.ok, result.observation.slice(0, 120));
     }
@@ -638,7 +648,7 @@ export async function executeTask(task) {
   await upsertFile(task, DESIGN_TOKENS_PATH, tokensCss);
 
   await updateTask(task.id, { phase: 'react' });
-  const { summary, previewUrl } = await runBuild(
+  const { summary, previewUrl, verificationKind } = await runBuild(
     task, project, sandbox, sandboxId, context, deps, `${basis.prompt}\n\n${renderDesignPrompt(design)}`, basis.acceptance,
     { planChars: basis.prompt.length, runtimePolicy: webValidationPolicy(basis.plan, config.actionFusionEnabled) }
   );
@@ -647,5 +657,5 @@ export async function executeTask(task) {
   await addMessage(task, 'assistant', summary, { previewUrl });
   await updateProject(task.project_id, task.user_id, { status: 'ready', preview_url: previewUrl || project.preview_url }, task.id);
   await extractMemories({ userId: task.user_id, projectId: task.project_id, userPrompt: task.prompt, summary, taskId: task.id });
-  return { summary, previewUrl };
+  return { summary, previewUrl, verificationKind };
 }

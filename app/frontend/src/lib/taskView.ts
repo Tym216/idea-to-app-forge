@@ -66,6 +66,7 @@ const PHASE_TEXT: Record<string, string> = {
   start_dev: '启动应用',
   finishing: '预览已就绪',
   done: '已完成',
+  done_with_warnings: '带警告完成',
   error: '已失败',
   cancelled: '已取消',
 };

@@ -21,6 +21,7 @@ const median = (values) => {
 };
 
 export function summarizeMetrics(rows) {
+  const successful = (row) => ['succeeded', 'succeeded_with_warnings'].includes(row.status);
   const failures = {};
   const totals = { model_requests: 0, logical_model_turns: null, input_tokens_reported: null, output_tokens_reported: null };
   for (const row of rows) {
@@ -29,12 +30,13 @@ export function summarizeMetrics(rows) {
     for (const [source, target] of [['input_tokens', 'input_tokens_reported'], ['output_tokens', 'output_tokens_reported']]) {
       if (Number.isFinite(row[source])) totals[target] = (totals[target] ?? 0) + row[source];
     }
-    if (row.status !== 'succeeded') failures[row.failure_code || row.status] = (failures[row.failure_code || row.status] || 0) + 1;
+    if (!successful(row)) failures[row.failure_code || row.status] = (failures[row.failure_code || row.status] || 0) + 1;
   }
   return {
     executions: rows.length,
-    succeeded: rows.filter((row) => row.status === 'succeeded').length,
-    execution_success_rate: rows.length ? rows.filter((row) => row.status === 'succeeded').length / rows.length : null,
+    succeeded: rows.filter(successful).length,
+    succeeded_with_warnings: rows.filter((row) => row.status === 'succeeded_with_warnings').length,
+    execution_success_rate: rows.length ? rows.filter(successful).length / rows.length : null,
     ...totals,
     logical_turn_totals_incomplete: rows.some((row) => !Number.isFinite(row.logical_model_turn_count)),
     token_totals_incomplete: rows.some((row) => row.usage_incomplete),

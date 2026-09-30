@@ -111,7 +111,7 @@ SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
 LLM_PROVIDER=zhipu
 ZHIPU_API_KEY=YOUR_ZHIPU_KEY
-ZHIPU_MODEL=glm-4.5-air
+LLM_MODEL=glm-4.5-air
 DAYTONA_API_KEY=YOUR_DAYTONA_KEY
 DAYTONA_API_URL=https://app.daytona.io/api
 DAYTONA_TARGET=us
@@ -120,7 +120,7 @@ MAX_TOOL_STEPS=40
 MAX_FIX_ROUNDS=1
 ```
 
-`glm-4.5-air` 是实际使用过的配置，不代表任意请求都已稳定通过。切换 DeepSeek 时，改为 `LLM_PROVIDER=deepseek`，并填写 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`；默认模型名为 `deepseek-chat`。没有配置 provider 时，代码默认选择 DeepSeek；智谱的代码默认模型为 `glm-4-plus`，建议显式填写。
+`glm-4.5-air` 是实际使用过的配置，不代表任意请求都已稳定通过。切换 DeepSeek 时，改为 `LLM_PROVIDER=deepseek`，并填写 `DEEPSEEK_API_KEY`、`LLM_MODEL`；默认模型名为 `deepseek-chat`。没有配置 provider 时，代码默认选择 DeepSeek；智谱的代码默认模型为 `glm-4-plus`，建议显式填写。
 
 也支持 OpenRouter 和 Gemini 直连的 Chat Completions 兼容入口。以下模型名为占位符，必须替换成自己账号可用的文本模型 ID；Key 仅填入 Worker。
 
@@ -128,8 +128,8 @@ MAX_FIX_ROUNDS=1
 # 二选一；将另一组保留为空即可
 LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=YOUR_OPENROUTER_KEY
-OPENROUTER_MODEL=vendor/model-id
-OPENROUTER_JSON_MODE=off
+LLM_MODEL=vendor/model-id
+LLM_JSON_MODE=off
 # 可选：固定 OpenRouter 上游供应商 slug
 OPENROUTER_UPSTREAM=
 ```
@@ -137,11 +137,11 @@ OPENROUTER_UPSTREAM=
 ```dotenv
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=YOUR_GOOGLE_AI_STUDIO_KEY
-GEMINI_MODEL=YOUR_AVAILABLE_GEMINI_MODEL_ID
-GEMINI_JSON_MODE=off
+LLM_MODEL=YOUR_AVAILABLE_GEMINI_MODEL_ID
+LLM_JSON_MODE=off
 ```
 
-OpenRouter 默认 Base URL 为 `https://openrouter.ai/api/v1`；Gemini 为 `https://generativelanguage.googleapis.com/v1beta/openai`，不是 Vertex AI 的认证入口。可用对应的 `*_BASE_URL` 覆盖。新入口不默认发送 temperature，也不强制 `response_format`，仍由提示词要求 JSON、解析层校验；确认模型支持 `json_object` 后可将 `*_JSON_MODE` 设为 `on`。这不改变现有 Agent 的工具协议。
+OpenRouter 默认 Base URL 为 `https://openrouter.ai/api/v1`；Gemini 为 `https://generativelanguage.googleapis.com/v1beta/openai`，不是 Vertex AI 的认证入口。可用 `LLM_BASE_URL` 覆盖。默认保留各调用原有 temperature；显式设置 `PLAN_TEMPERATURE` / `BUILD_TEMPERATURE` 时分别覆盖。JSON 由 `LLM_JSON_MODE=auto|on|off` 控制，已知不兼容的模型即使请求 on 也会降级并警告。这不改变现有 Agent 的工具协议。
 
 OpenRouter 请求明确关闭上游故障降级；未指定 `OPENROUTER_UPSTREAM` 时，首次上游仍由 OpenRouter 选择。平台不会自动更换模型。Langfuse 继续记录请求模型、响应模型及真实用量，响应提供上游名时也会记录。接口依据 [OpenRouter 文档](https://openrouter.ai/docs/api_reference/overview) 和 [Gemini 兼容文档](https://ai.google.dev/gemini-api/docs/openai)；新增接口仅完成本地替身请求测试，尚未用真实 Key 验证。
 
@@ -150,11 +150,13 @@ OpenRouter 请求明确关闭上游故障降级；未指定 `OPENROUTER_UPSTREAM
 Worker 自动加载自己的 `.env`。在该目录运行：
 
 ```bash
+npm run doctor:llm  # 只查配置与 GET /models；不发送生成请求
+# npm run smoke:llm  # 可选：一次真实、可能计费的 JSON action 请求
 npm run doctor
 npm start
 ```
 
-`doctor` 检查基础配置、部分 Supabase 表/RPC、模型连接及 Daytona 鉴权；会发送一次小型真实模型请求，产生少量用量。它不验证所有迁移或完整业务流程。`npm run smoke:daytona` 另行创建测试沙箱，检查命令与文件操作并尝试清理，会使用 Daytona 资源。
+`doctor:llm` 检查 LLM 配置、请求能力和可用时的模型列表；Worker 启动前也会做一次只读连接检查。模型列表接口返回 404/405 时标记 unknown 并继续，鉴权/连接失败或模型明确未列出则阻止启动；`smoke:llm` 才单独验证 JSON action。原有 `doctor` 检查基础配置、部分 Supabase 表/RPC、模型连接及 Daytona 鉴权；它也会发送一次小型真实模型请求，产生少量用量。它不验证所有迁移或完整业务流程。`npm run smoke:daytona` 另行创建测试沙箱，检查命令与文件操作并尝试清理，会使用 Daytona 资源。
 
 启动后看到 `worker.started`；空闲时出现 `worker.polling`。任务事件包括 `task.claimed`、`llm.completed`、`agent.tool`、`preview.written`、`task.finished`。若出现 `task.fail_write_rejected`，需核对数据库状态，不能仅凭前一条日志判断状态已保存。
 
@@ -179,7 +181,7 @@ npm start
 
 **暂停与重试。** 暂停使当前执行许可失效，阻止后续模型和工具调用；已发出的远程操作不保证立即停止，已产生的费用不会撤回。继续暂停任务保留剩余预算。失败任务的“恢复”沿用同一任务和已保存成果，并重置本次工具/构建修复预算，最多恢复三次；“新建任务重试”创建另一轮，保留原失败记录。
 
-**浏览器验收。** 构建、启动、验收通过后才允许 `finish`。检查绑定保存的 Plan/action 版本，Build 的 `verify` 不能另传弱化断言。修改代码使旧构建和验收结果失效。浏览器验收首次失败即停止自动修复，同一任务累计最多两次验收，手动恢复不会清零计数；定义有误时需修订计划再批准。有限检查通过不等于应用没有其他缺陷。
+**浏览器验收。** 构建、启动并取得浏览器验收结果后才允许 `finish`；明确的核心故障会阻断，警告或证据不足则保留预览并如实标注。检查绑定保存的 Plan/action 版本，Build 的 `verify` 不能另传弱化断言。修改代码使旧构建和验收结果失效。浏览器验收首次失败即停止自动修复，同一任务累计最多两次验收，手动恢复不会清零计数；定义有误时需修订计划再批准。有限检查通过不等于应用没有其他缺陷。
 
 **预览恢复。** 打开已有沙箱的工作区或点击预览刷新，会排队检查、必要时启动沙箱与 Vite，并更新预览地址。它不调用模型、不继续暂停的生成任务、不创建替代沙箱。Worker 离线或忙于其他任务时需要等待。直接打开 Daytona URL 不经过这套恢复流程。
 
@@ -244,7 +246,7 @@ node preview-recovery.test.mjs
 
 | 验证项 | 截至本次核对的结果与边界 |
 |---|---|
-| Worker | 全量 **143/143** 通过，语法检查通过；主要为本地单元和替身服务测试 |
+| Worker | 全量 **169/169** 通过，语法检查通过；主要为本地单元和替身服务测试 |
 | 数据库基础、计划、暂停、预览恢复 | PGlite 测试通过，不能代替 Supabase 云端全流程验收 |
 | 数据库删除测试 | **未通过**：`ita_complete_project_deletion` 调用参数与当前迁移签名不一致，执行中断 |
 | 前端 | 已通过本地 lint/build；`/ui-mock` 为模拟展示，不能作为真实生成证据 |
@@ -305,3 +307,11 @@ Worker 将逻辑调用与实际 Provider 请求分别记录。明确的短暂故
 ## 本地模型
 
 Ollama 和 LM Studio 复用 OpenAI 兼容入口，可不填 API Key，仍需填写已下载/加载的模型 ID。端点、WSL 地址、自检及 DeepSeek thinking 解析边界见 [本地模型说明](docs/local-models.md)。
+
+### Provider 能力与响应归一化
+
+Plan/Build 可用 `PLAN_PROVIDER_OPTIONS` / `BUILD_PROVIDER_OPTIONS` 传入已确认的供应商原生参数；未知可选参数会省略并警告。旧 `PLAN_REASONING_MODE` 等配置仍兼容，新的 stage options 非空时优先。Build 保持 JSON action。不同模型的关闭能力并不相同；配置、支持范围和未验证边界见 [Provider 能力契约](docs/provider-capabilities.md)。
+
+### 浏览器验收结论
+
+Verify 将页面打不开、占位页或运行时崩溃等有明确证据的故障视为阻断项。已标为核心流程的条件若有明确断言失败也会阻断；细节检查的明确失败显示为警告；无法确定是应用问题还是断言问题时显示“证据不足”。后两类允许保留可预览版本，任务显示“已生成 · 验收有待核对项”，未通过的条件不会被写成已验证。Worker 不自动反复修复；用户可提交新的 Build 修复要求，或用 Plan 修订验收条件。浏览器工具故障仍单独报错，不能冒充应用成功。新的失败记录会保存有限的逐步观察值；旧执行无法补录。
