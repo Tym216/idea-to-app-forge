@@ -4,7 +4,7 @@ import { classifyProviderError, retryAfterMs, withProviderRetry } from '../src/p
 
 const transient = () => Object.assign(new Error('unavailable'), { httpStatus: 503 });
 test('central classification distinguishes rate/quota/auth/timeout/transport; numeric codes are safe', () => {
-  for (const error of [transient(), { code: 'LLM_NETWORK', causeCode: 'ECONNRESET' }, { httpStatus: 429, retryAfterMs: 1000 }]) {
+  for (const error of [transient(), { httpStatus: 408 }, { code: 'LLM_NETWORK', causeCode: 'ECONNRESET' }, { httpStatus: 429, retryAfterMs: 1000 }]) {
     assert.equal(classifyProviderError(error).action, 'retry_once');
   }
   for (const error of [{ httpStatus: 429, providerCode: 1113, retryAfterMs: 100 },
@@ -60,4 +60,13 @@ test('pause during backoff or lease loss before resend prevents a second request
     wait: async () => {}, beforeAttempt: async (attempt) => { if (attempt === 2) throw lease; },
   }), (e) => e === lease);
   assert.equal(calls, 1);
+});
+
+test('HTTP 408 gets at most one transparent retry under the same deadline', async () => {
+  let calls = 0;
+  await assert.rejects(withProviderRetry(async () => {
+    calls++;
+    throw Object.assign(new Error('request timeout'), { httpStatus: 408 });
+  }, { wait: async () => {} }), { httpStatus: 408 });
+  assert.equal(calls, 2);
 });

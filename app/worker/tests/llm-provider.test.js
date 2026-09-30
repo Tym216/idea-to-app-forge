@@ -20,12 +20,13 @@ test('未知供应商及缺少模型拒绝,不隐式退到 DeepSeek', () => {
   assert.ok(providerProblems({ llmProvider: 'openrouter', openrouterApiKey: 'test', openrouterModel: 'test', openrouterJsonMode: 'bad' }).some((x) => x.includes('JSON_MODE')));
 });
 
-test('JSON 和 temperature 兼容策略不影响旧入口,新入口可显式启用 JSON', () => {
+test('compatible providers preserve caller temperature; JSON mode stays explicit', () => {
   const base = { messages: [{ role: 'user', content: '输出 JSON' }], model: 'test-model', temperature: 0.2, json: true };
-  for (const providerName of ['gemini', 'openrouter']) {
+  for (const providerName of ['gemini', 'openrouter', 'ollama', 'lmstudio']) {
     const body = buildRequestBody({ ...base, providerName });
     assert.equal(body.response_format, undefined);
-    assert.equal(body.temperature, undefined);
+    assert.equal(body.temperature, 0.2);
+    assert.equal(buildRequestBody({ ...base, providerName, temperature: undefined }).temperature, undefined);
     assert.deepEqual(buildRequestBody({ ...base, providerName, jsonMode: 'on' }).response_format, { type: 'json_object' });
     assert.equal(buildRequestBody({ ...base, providerName, jsonMode: 'on', json: false }).response_format, undefined);
   }
@@ -58,6 +59,7 @@ test('新增供应商通过真实 chat 入口使用正确请求,保留返回文�
       assert.equal(calls[0].url, resolveProvider(config).url);
       assert.equal(calls[0].options.headers.Authorization, 'Bearer test-key');
       assert.equal(JSON.parse(calls[0].options.body).model, 'test-model');
+      assert.equal(JSON.parse(calls[0].options.body).temperature, 0.2);
       assert.equal(JSON.parse(calls[0].options.body).response_format, undefined);
       calls.length = 0;
       globalThis.fetch = async () => { calls.push(1); return { ok: false, status: 429, text: async () => 'test quota exceeded' }; };

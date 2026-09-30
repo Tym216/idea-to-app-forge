@@ -46,8 +46,8 @@ export function supportsJsonMode(providerName, model, mode = 'auto') {
 export function buildRequestBody({ providerName, model, messages, temperature, json, jsonMode = 'auto', upstream = '' }) {
   return {
     model, messages,
-    // 新供应商不默认传 temperature，避免推理模型不接受该参数。
-    ...(['deepseek', 'zhipu'].includes(providerName) && temperature !== undefined ? { temperature } : {}),
+    // Preserve caller sampling semantics across compatible providers; add explicit capability exceptions only when proven.
+    ...(temperature !== undefined ? { temperature } : {}),
     ...(json && supportsJsonMode(providerName, model, jsonMode) ? { response_format: { type: 'json_object' } } : {}),
     ...(providerName === 'openrouter' ? {
       provider: { allow_fallbacks: false, ...(upstream.trim() ? { order: [upstream.trim()] } : {}) },

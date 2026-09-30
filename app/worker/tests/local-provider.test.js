@@ -32,6 +32,7 @@ test('actual chat uses shared local endpoint with absent or optional auth and no
           assert.deepEqual(options.headers, requestHeaders(key));
           const body = JSON.parse(options.body);
           assert.equal(body.model, 'local-model');
+          assert.equal(body.temperature, 0.2);
           assert.ok(!Object.hasOwn(body, 'response_format'));
           return new Response(JSON.stringify({ choices: [{ message: { content: '{"tool":"read_file","args":{"path":"package.json"}}' } }] }));
         };

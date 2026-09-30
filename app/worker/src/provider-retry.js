@@ -24,6 +24,8 @@ export function classifyProviderError(error) {
     return error.retryAfterMs != null || /rate.?limit|too many requests|限流|请求频率/i.test(message)
       ? retry('rate_limit') : fail('unknown_429');
   }
+  // HTTP 408 is a short request-level timeout; it shares the same one-retry deadline.
+  if (status === 408) return retry('request_timeout');
   if ([500, 502, 503, 504].includes(status)) return retry('transient_server');
   if (error?.code === 'LLM_NETWORK' && ['ECONNRESET', 'EAI_AGAIN', 'ECONNREFUSED', 'UND_ERR_SOCKET', 'EPIPE'].includes(error.causeCode)) return retry('transient_connection');
   return fail('non_transient_or_unknown');
