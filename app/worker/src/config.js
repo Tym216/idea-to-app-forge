@@ -24,6 +24,7 @@ export const config = {
   llmApiKey: optional('LLM_API_KEY'),
   llmJsonMode: optional('LLM_JSON_MODE'),
   llmTimeoutMs: Number(optional('LLM_TIMEOUT_MS', '120000')),
+  llmDebugCaptureRequest: optional('LLM_DEBUG_CAPTURE_REQUEST', 'false') === 'true',
   planTemperature: optional('PLAN_TEMPERATURE') === '' ? null : Number(optional('PLAN_TEMPERATURE')),
   buildTemperature: optional('BUILD_TEMPERATURE') === '' ? null : Number(optional('BUILD_TEMPERATURE')),
   planProviderOptionsRaw: optional('PLAN_PROVIDER_OPTIONS'),

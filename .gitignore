@@ -70,3 +70,6 @@ traces/
 *.db
 *.db-journal
 *.crt
+
+# Opt-in local effective LLM requests and raw responses
+**/.forge-debug/

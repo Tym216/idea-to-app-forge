@@ -1,4 +1,5 @@
 import { config } from './config.js';
+import { requestDiagnostics, localRequestCapture } from './llm-diagnostics.js';
 import { beginModelTurn, beginModelRequest, measureContext } from './task-metrics.js';
 import { logger } from './logger.js';
 import { beforeModelCall, currentExecution, assertExecutionActive } from './execution-control.js';
@@ -47,11 +48,22 @@ export function classifyModelFetchError(error, { providerName, model, elapsedMs 
 /** fetch 收到响应头后已返回，但读取正文仍可能超时或断线。 */
 export async function readModelResponse(response, context) {
   try {
-    return response.ok ? await response.json() : await response.text();
+    let payload;
+    if (context.captureRaw) {
+      const raw = await response.text();
+      context.onBodyCompleted?.();
+      context.captureRaw(raw);
+      payload = response.ok ? JSON.parse(raw) : raw;
+    } else {
+      payload = response.ok ? await response.json() : await response.text();
+      context.onBodyCompleted?.();
+    }
+    return payload;
   } catch (error) {
     // 用户暂停/租约失效保持原始控制原因，不能误归为模型网络故障。
     assertExecutionActive();
     if (error instanceof SyntaxError) {
+      context.onBodyCompleted?.();
       const result = new Error(`LLM ${context.providerName} 返回的正文不是有效 JSON。`);
       result.code = 'LLM_INVALID_RESPONSE';
       throw result;
@@ -64,7 +76,7 @@ export async function chat(messages, options = {}) {
   return (await chatResponse(messages, options)).text;
 }
 
-export async function chatResponse(messages, { temperature = 0.2, json = false, taskId, purpose = 'unspecified', contextParts, reasoningMode = 'off', reasoningPolicy = 'best_effort', interactionMode = 'structured_text' } = {}) {
+export async function chatResponse(messages, { temperature = 0.2, json = false, taskId, purpose = 'unspecified', contextParts, reasoningMode = 'off', reasoningPolicy = 'best_effort', interactionMode = 'structured_text', captureFactory = localRequestCapture } = {}) {
   await beforeModelCall();
   const provider = resolveProvider(config);
   if (provider.requiresKey && !provider.key) {
@@ -113,9 +125,17 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
       let status = 'failed';
       let recordedUsage;
       let failureCode;
+      let usageBreakdown;
+      const diagnostic = requestDiagnostics({ requestId: request.requestId, logicalCallId, attempt,
+        provider: provider.name, model: provider.model, purpose, timeoutMs: config.llmTimeoutMs ?? LLM_REQUEST_TIMEOUT_MS,
+        messagesCount: messages.length, contextChars, requestBody, capability,
+        requestedOptions: nativeOptions, body });
+      const capture = captureFactory({ enabled: config.llmDebugCaptureRequest === true, requestId: request.requestId });
       const executionId = currentExecution()?.executionId ?? null;
       try {
       let response;
+      logger.info('model.request_started', { task_id: taskId ?? null, execution_id: executionId, ...diagnostic.snapshot() });
+      capture.request(requestBody);
       try {
         response = await fetch(provider.url, {
           method: 'POST',
@@ -131,11 +151,16 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
         logger.warn('llm.request_failed', {
           taskId, provider: config.llmProvider, model: provider.model,
           code: classified.code, causeCode: classified.causeCode, ms: Math.max(0, performance.now() - started),
+          ...diagnostic.snapshot(),
         });
         throw classified;
       }
 
-      const payload = await readModelResponse(response, { providerName: config.llmProvider, model: provider.model, started });
+      diagnostic.headers(response);
+      const payload = await readModelResponse(response, { providerName: config.llmProvider, model: provider.model, started,
+        onBodyCompleted: () => diagnostic.bodyCompleted(),
+        ...(capture.enabled ? { captureRaw: (raw) => capture.response(raw) } : {}) });
+      diagnostic.complete(typeof payload === 'object' ? payload : null);
       if (!response.ok) {
         const error = new Error(`LLM ${config.llmProvider} ${response.status}: ${payload.slice(0, 500)}`);
         error.code = 'LLM_HTTP';
@@ -151,6 +176,7 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
       const ms = Math.max(0, performance.now() - started);
       const { usageDetails, breakdown } = mapUsage(normalized.usage?.details);
       recordedUsage = usageDetails;
+      usageBreakdown = breakdown;
       try { validateResponse(normalized, interactionMode); } catch (validationError) {
         const details = responseDiagnostics(payload);
         obs.update({
@@ -189,21 +215,30 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
       });
       logger.info('llm.completed', { taskId, provider: config.llmProvider, model: provider.model, ms, chars: content.length });
       status = 'succeeded';
+      diagnostic.succeeded();
       request.finish(status, recordedUsage);
       await currentExecution()?.onModelEvent?.({ event: 'finished', model: provider.model, ms, chars: content.length, usage: usageDetails });
       return normalized;
       } catch (error) {
         failureCode = typeof error?.code === 'string' ? error.code : 'ERROR';
+        if (['LLM_TIMEOUT', 'LLM_NETWORK'].includes(failureCode)) {
+          const details = diagnostic.snapshot();
+          error.requestId = request.requestId;
+          error.requestPhase = details.request_phase;
+          error.headersReceived = details.headers_received;
+          error.message += ` [request_id=${request.requestId}, phase=${details.request_phase}, headers_received=${details.headers_received}]`;
+        }
         obs.update({ metadata: { error_classification: classifyProviderError(error) } });
         throw error;
       } finally {
         const measured = request.finish(status, recordedUsage);
+        const debugPaths = await capture.finish();
+        const diagnostics = diagnostic.snapshot();
         logger.info('model.request', { task_id: taskId ?? null, execution_id: executionId,
-          logical_call_id: logicalCallId, attempt,
-          request_id: request.requestId, provider: config.llmProvider, model: provider.model, purpose,
-          context_chars: contextChars, ...measured, failure_code: status === 'failed' ? failureCode : null });
-        obs.update({ metadata: { provider: config.llmProvider, requested_model: provider.model, purpose,
-          request_id: request.requestId, context_chars: contextChars, request_status: status } });
+          ...diagnostics, ...measured, ...debugPaths,
+          ...(usageBreakdown ? { usage_breakdown: usageBreakdown } : {}), failure_code: status === 'failed' ? failureCode : null });
+        // Local paths/body capture never enter remote tracing; only safe lifecycle metadata does.
+        obs.update({ metadata: { ...diagnostics, request_status: status } });
       }
     }
   ), {

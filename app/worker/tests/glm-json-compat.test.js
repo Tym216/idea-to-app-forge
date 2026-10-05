@@ -12,7 +12,7 @@ test('GLM-4.5-air chat serializes auto without response_format and preserves cor
   ];
   let requests = 0;
   try {
-    Object.assign(config, { llmProvider: 'zhipu', zhipuModel: 'glm-4.5-air', zhipuApiKey: 'test', zhipuJsonMode: 'auto' });
+    Object.assign(config, { llmModel: '', llmBaseUrl: '', llmApiKey: '', llmJsonMode: '', llmDebugCaptureRequest: false, llmProvider: 'zhipu', zhipuModel: 'glm-4.5-air', zhipuApiKey: 'test', zhipuJsonMode: 'auto' });
     globalThis.fetch = async (_url, options) => {
       requests++;
       const body = JSON.parse(options.body);
