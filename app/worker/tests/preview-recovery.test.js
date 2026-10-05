@@ -48,7 +48,7 @@ test('server readiness wait is bounded', async () => {
 });
 test('queue phases and completion all carry the claimed execution id', async () => {
   const calls = [];
-  await processOnePreviewRecovery({ workerId: 'w', getSandbox: () => provider(), rpc: async (fn, args) => {
+  await processOnePreviewRecovery({ workspaceFactory: () => ({ initialize: async () => {}, runtime: async (_kind, fn) => fn() }), workerId: 'w', getSandbox: () => provider(), rpc: async (fn, args) => {
     calls.push({ fn, args });
     return { data: fn.includes('claim') ? [{ project_id: 'p', sandbox_id: 'saved', execution_id: 'E1' }] : true, error: null };
   } });
@@ -58,7 +58,7 @@ test('queue phases and completion all carry the claimed execution id', async () 
 });
 test('lost lease stops before accessing sandbox', async () => {
   const p = provider();
-  const r = await processOnePreviewRecovery({ workerId: 'w', getSandbox: () => p, rpc: async (fn) => ({
+  const r = await processOnePreviewRecovery({ workspaceFactory: () => ({ initialize: async () => {}, runtime: async (_kind, fn) => fn() }), workerId: 'w', getSandbox: () => p, rpc: async (fn) => ({
     data: fn.includes('claim') ? [{ project_id: 'p', sandbox_id: 'saved', execution_id: 'E1' }] : false, error: null,
   }) });
   // Provider construction has no remote effects; the first permission check blocks get/start.
@@ -68,7 +68,7 @@ test('lost lease stops before accessing sandbox', async () => {
 test('Daytona failure is persisted as failed with secrets redacted', async () => {
   const p = provider(); p.client.get = async () => { throw new Error('503 Bearer dtn_secretkey123 https://x.test/?token=abc'); };
   const calls = [];
-  const result = await processOnePreviewRecovery({ workerId: 'w', getSandbox: () => p, rpc: async (fn, args) => {
+  const result = await processOnePreviewRecovery({ workspaceFactory: () => ({ initialize: async () => {}, runtime: async (_kind, fn) => fn() }), workerId: 'w', getSandbox: () => p, rpc: async (fn, args) => {
     calls.push(args);
     return { data: fn.includes('claim') ? [{ project_id: 'p', sandbox_id: 'saved', execution_id: 'E1' }] : true, error: null };
   } });
@@ -78,5 +78,5 @@ test('Daytona failure is persisted as failed with secrets redacted', async () =>
   assert.doesNotMatch(calls.at(-1).p_error, /dtn_secret|token=abc/);
 });
 test('empty queue never touches Daytona', async () => {
-  assert.equal(await processOnePreviewRecovery({ workerId: 'w', getSandbox: () => { throw new Error('unexpected'); }, rpc: async () => ({ data: [], error: null }) }), null);
+  assert.equal(await processOnePreviewRecovery({ workspaceFactory: () => ({ initialize: async () => {}, runtime: async (_kind, fn) => fn() }), workerId: 'w', getSandbox: () => { throw new Error('unexpected'); }, rpc: async () => ({ data: [], error: null }) }), null);
 });

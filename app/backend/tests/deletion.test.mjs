@@ -1,14 +1,17 @@
 /**
- * 0003 验证:PGlite 中按 0001 → 0002 → 0003 执行(并重复执行 0003)。
+ * 删除回归:PGlite 中依序加载 0001–0006；在 0003 阶段创建 legacy fixture 后升级。
  * 覆盖两阶段删除、删除期间阻断、失败可重试、幂等、旧执行失效、记忆启停与建议、质量反馈隔离、审计保留。
  */
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
+import { randomUUID } from 'node:crypto';
+import { sourceManifest, sourceDiff } from '../../worker/src/managed-source.js';
 
 const A = '11111111-1111-1111-1111-111111111111';
 const B = '22222222-2222-2222-2222-222222222222';
 const W = 'worker-1';
 const db = new PGlite();
+process.on('uncaughtException', (e) => { console.error(e.message, e.where || '', e.stack?.split('\n').slice(-2).join('\n')); process.exit(1); });
 const results = [];
 
 async function as(role, uid, sql, params = []) {
@@ -69,6 +72,81 @@ await svc(`insert into public.ita_files(project_id,user_id,path,content) values 
 await svc(`insert into public.ita_snapshots(project_id,user_id,label,files) values ($1,$2,'s','{}'::jsonb)`, [P, A]).catch(async () =>
   svc(`insert into public.ita_snapshots(project_id,user_id,files) values ($1,$2,'{}'::jsonb)`, [P, A]));
 
+
+// Upgrade real migrations after legacy fixture creation, so revoked source DML is respected.
+for (const f of ['0004_task_pause.sql', '0005_preview_recovery.sql', '0006_workspace_contract.sql']) {
+  await db.exec(readFileSync(new URL(`../migrations/${f}`, import.meta.url), 'utf8'));
+  console.log(`已执行 ${f}`);
+}
+
+function workspaceCall(task) {
+  return async (name, extra = [], types = []) => {
+    const casts = ['uuid', 'uuid', 'text', 'uuid', ...types];
+    return (await one(svc(`select to_jsonb(public.${name}(${casts.map((type, i) => `$${i + 1}::${type}`).join(',')})) value`,
+      [task.project_id, task.id, W, task.execution_id, ...extra]))).value;
+  };
+}
+
+// Trusted service evidence below is a database fixture, not a claim of real browser verification.
+async function workspaceFixture(projectId, content) {
+  await asA(`insert into public.ita_tasks(project_id,user_id,mode,prompt) values ($1,$2,'build','workspace deletion fixture')`, [projectId,A]);
+  const task = await claim();
+  if (task.project_id !== projectId) throw new Error('fixture claimed wrong project');
+  const rpc = workspaceCall(task);
+  const basis = await one(svc(`select * from public.ita_worker_save_plan($1,$2,$3,'action',$4::jsonb)`,
+    [task.id,W,task.execution_id,JSON.stringify({understanding:'fixture',scope:['fixture'],flows:['打开页面'],rules:['显示内容'],storage:'仅内存',steps:['展示内容'],design:'简洁',questions:[],
+      acceptance:[{id:'A1',action:'打开页面',expect:'显示内容',external:false,severity:'core',steps:[{op:'expectText',selector:'main',contains:content}]}]})]));
+  await update(task,{plan_id:basis.id,plan_version:basis.version});
+  const before = sourceManifest((await rpc('ita_workspace_read')).files);
+  let writer = await rpc('ita_workspace_acquire',[randomUUID(),'materialize','fixture-sandbox',null],['uuid','text','text','uuid']);
+  await rpc('ita_workspace_finish_operation',[writer.token,before.code_hash],['uuid','text']);
+  const target = sourceManifest([{path:'src/App.tsx',content}]);
+  const cs = await rpc('ita_workspace_prepare',['deletion-fixture','agent',0,JSON.stringify(sourceDiff(before,target)),target.code_hash],['text','text','bigint','jsonb','text']);
+  writer = await rpc('ita_workspace_acquire',[randomUUID(),'mutation','fixture-sandbox',cs.id],['uuid','text','text','uuid']);
+  const committed = await rpc('ita_workspace_commit',[writer.token,cs.id,JSON.stringify(target.files),target.code_hash],['uuid','uuid','jsonb','text']);
+  const buildBasis = 'a'.repeat(64), verifyBasis = 'b'.repeat(64);
+  for (const [kind,fingerprint] of [['build',buildBasis],['verify',verifyBasis]]) {
+    const accepted=await rpc('ita_workspace_evidence',[kind,JSON.stringify({workspace_revision:committed.revision,code_hash:target.code_hash,basis_fingerprint:fingerprint,status:'passed',fixture:true})],['text','jsonb']);
+    if (!accepted) throw new Error('fixture evidence rejected');
+  }
+  const checkpoint = await rpc('ita_complete_build_checkpoint',[`${task.id}:checkpoint`,committed.revision,target.code_hash,buildBasis,verifyBasis,basis.id,'数据库级联 fixture','https://fixture.example/'],['text','bigint','text','text','text','uuid','text','text']);
+  return {task,cs,checkpoint,manifest:target,revision:committed.revision};
+}
+
+const keepWorkspace = await workspaceFixture(Q,'keep');
+const extended = await newProject('workspace 扩展删除','sbx-extended');
+const extendedWorkspace = await workspaceFixture(extended,'extended');
+rec('0006 fixture: confirmed workspace、changeset 与扩展 checkpoint 已实际创建',
+  (await one(svc('select workspace_state,checkpoint_id from public.ita_projects where id=$1',[extended]))).workspace_state==='confirmed' &&
+  (await count('select count(*)::int n from public.ita_changesets where project_id=$1',[extended]))===1 &&
+  (await one(svc('select kind,workspace_revision,code_hash,basis_id from public.ita_snapshots where id=$1',[extendedWorkspace.checkpoint.snapshot_id]))).kind==='checkpoint');
+await denied('service_role 旧 direct files INSERT 仍被 ACL 拒绝',()=>svc(`insert into public.ita_files(project_id,user_id,path,content) values ($1,$2,'bypass.ts','x')`,[extended,A]),/permission/);
+await denied('service_role 旧 direct files UPDATE 仍被 ACL 拒绝',()=>svc(`update public.ita_files set content='bypass' where project_id=$1`,[extended]),/permission/);
+await denied('checkpoint immutable trigger 在 owner fixture UPDATE 时也拒绝修改',()=>db.query(`update public.ita_snapshots set code_hash='changed' where id=$1`,[extendedWorkspace.checkpoint.snapshot_id]),/CHECKPOINT_IMMUTABLE/);
+
+// Delete a project with a retained writer and an unresolved source changeset.
+await asA(`insert into public.ita_tasks(project_id,user_id,mode,prompt) values ($1,$2,'build','pending fixture')`,[extended,A]);
+const pendingTask = await claim();
+const pendingRpc = workspaceCall(pendingTask);
+const pendingTarget = sourceManifest([{path:'src/App.tsx',content:'pending'}]);
+const pendingCs = await pendingRpc('ita_workspace_prepare',['pending-fixture','agent',extendedWorkspace.revision,JSON.stringify(sourceDiff(extendedWorkspace.manifest,pendingTarget)),pendingTarget.code_hash],['text','text','bigint','jsonb','text']);
+const pendingWriter = await pendingRpc('ita_workspace_acquire',[randomUUID(),'mutation','fixture-sandbox',pendingCs.id],['uuid','text','text','uuid']);
+await asA(`select public.ita_request_project_delete($1,'req-extended')`,[extended]);
+await denied('删除中的旧 writer 不能通过 workspace RPC commit',()=>pendingRpc('ita_workspace_commit',[pendingWriter.token,pendingCs.id,JSON.stringify(pendingTarget.files),pendingTarget.code_hash],['uuid','uuid','jsonb','text']),/LEASE_LOST/);
+const extendedJob = await one(svc(`select * from public.ita_claim_project_deletion('${W}',300)`));
+if(extendedJob.project_id!==extended) throw new Error('wrong deletion fixture project');
+await svc('select public.ita_complete_project_deletion($1,$2,$3,true,null,$4)',[extended,W,extendedJob.attempts,'req-extended']);
+const extendedCounts={};
+for(const table of ['ita_changesets','ita_snapshots','ita_files','ita_tasks','ita_plans','ita_preview_recoveries']) {
+  extendedCounts[table]=await count(`select count(*)::int n from public.${table} where project_id=$1`,[extended]);
+}
+rec('0006: retained writer 项目删除及新表/FK/快照级联完成',Object.values(extendedCounts).every(n=>n===0)&&
+  (await count('select count(*)::int n from public.ita_projects where id=$1',[extended]))===0,JSON.stringify(extendedCounts));
+rec('另一个项目的 changeset/checkpoint/源码不受影响',
+  (await count('select count(*)::int n from public.ita_changesets where project_id=$1',[Q]))===1&&
+  (await count('select count(*)::int n from public.ita_snapshots where id=$1',[keepWorkspace.checkpoint.snapshot_id]))===1&&
+  (await one(svc('select content from public.ita_files where project_id=$1 and not deleted',[Q]))).content==='keep');
+
 const s = await one(asA(`select id from public.ita_memory_suggestions where project_id=$1 and status='pending'`, [P]));
 await denied('用户B 不能确认A的建议', () => asB('select public.ita_resolve_memory_suggestion($1,true)', [s.id]), /not owned/);
 await asA('select public.ita_resolve_memory_suggestion($1,true)', [s.id]);
@@ -106,7 +184,7 @@ rec('请求删除幂等:重复调用仍为 deleting,队列只有一条', r1.s ==
 rec('删除请求后旧执行写入被拒绝', (await update(running, { phase: 'zombie' })) === false);
 rec('删除请求后旧执行心跳被拒绝', (await one(svc('select public.ita_heartbeat_task($1,$2,$3,120) ok', [running.id, W, running.execution_id]))).ok === false);
 await denied('删除中:旧执行文件写入被拒绝', () =>
-  svc(`insert into public.ita_files(project_id,user_id,path,content) values ($1,$2,'late.ts','x')`, [P, A]), /PROJECT_DELETING/);
+  svc(`insert into public.ita_files(project_id,user_id,path,content) values ($1,$2,'late.ts','x')`, [P, A]), /PROJECT_DELETING|permission denied/);
 await denied('删除中:提交任务被拒绝', () =>
   asA(`insert into public.ita_tasks(project_id,user_id,mode,prompt) values ($1,$2,'build','x')`, [P, A]), /PROJECT_DELETING/);
 await denied('删除中:批准计划被拒绝', () => asA('select * from public.ita_approve_plan($1,1)', [plan.id]), /PROJECT_DELETING/);
@@ -121,7 +199,7 @@ await denied('删除中:Worker 不能改换 sandbox_id', async () => {
 const job = await one(svc(`select * from public.ita_claim_project_deletion('${W}',300)`));
 rec('删除任务只携带该项目自己的 sandbox_id', job.project_id === P && job.sandbox_id === 'sbx-P');
 rec('删除任务在租约期内不会被重复领取', (await svc(`select * from public.ita_claim_project_deletion('worker-2',300)`)).rows.length === 0);
-await svc(`select public.ita_complete_project_deletion($1,$2,false,'Daytona 503')`, [P, W]);
+await svc(`select public.ita_complete_project_deletion($1,$2,$3,false,'Daytona 503')`, [P, W, job.attempts]);
 const failed = await one(asA('select deletion_state, delete_error from public.ita_projects where id=$1', [P]));
 rec('Daytona 删除失败:项目仍可见,状态 delete_failed', failed?.deletion_state === 'delete_failed' && failed.delete_error.includes('503'));
 rec('失败后项目数据仍在', (await count('select count(*)::int n from public.ita_files where project_id=$1', [P])) === 1);
@@ -129,13 +207,13 @@ await asA(`select public.ita_request_project_delete($1,'req-retry')`, [P]);
 const job2 = await one(svc(`select * from public.ita_claim_project_deletion('${W}',300)`));
 rec('重试走同一流程', job2.project_id === P && job2.attempts === 2);
 await denied('其他 Worker 不能完成不属于它的删除', () =>
-  svc(`select public.ita_complete_project_deletion($1,'worker-2',true)`, [P]), /DELETION_LEASE_LOST/);
-const done = await one(svc(`select public.ita_complete_project_deletion($1,$2,true,null,'req-done') s`, [P, W]));
+  svc(`select public.ita_complete_project_deletion($1,'worker-2',$2,true)`, [P, job2.attempts]), /DELETION_LEASE_LOST/);
+const done = await one(svc(`select public.ita_complete_project_deletion($1,$2,$3,true,null,'req-done') s`, [P, W, job2.attempts]));
 rec('沙箱清理成功后删除完成', done.s === 'deleted');
 
 const left = {};
 for (const t of ['ita_projects:id', 'ita_messages', 'ita_tasks', 'ita_plans', 'ita_plan_feedback', 'ita_files', 'ita_snapshots',
-  'ita_memories', 'ita_memory_suggestions', 'ita_task_feedback', 'ita_project_deletions']) {
+  'ita_memories', 'ita_memory_suggestions', 'ita_task_feedback', 'ita_project_deletions', 'ita_changesets', 'ita_preview_recoveries']) {
   const [table, col = 'project_id'] = t.split(':');
   left[table] = await count(`select count(*)::int n from public.${table} where ${col}=$1`, [P]);
 }
@@ -149,7 +227,7 @@ const audit = (await svc('select actor_id, action, result, request_id, metadata 
 const actions = audit.map((a) => `${a.action}:${a.result}`);
 rec('审计记录在项目删除后仍保留', ['project.delete_request:requested', 'project.delete:failure', 'project.delete:success',
   'memory.disable:success', 'memory.enable:success', 'memory.suggestion_accept:success'].every((x) => actions.includes(x)), actions.join(','));
-rec('审计记录请求 ID', audit.find((a) => a.action === 'project.delete' && a.result === 'success').request_id === 'req-done');
+rec('审计记录请求 ID', audit.find((a) => a.action === 'project.delete' && a.result === 'success' && a.request_id==='req-done').request_id === 'req-done');
 const auditText = JSON.stringify(audit);
 rec('审计不含需求/代码/预览 URL/令牌', !/需求内容|code|token|p\.example|做待办|中文/.test(auditText));
 await denied('客户端不能写审计', () => asA(`insert into public.ita_audit_log(action,result,request_id) values ('x','success','r')`), /permission/);
@@ -175,4 +253,5 @@ await denied('authenticated 不能领取删除任务', () => asA(`select * from 
 
 const pass = results.filter(Boolean).length;
 console.log(`\n========== 汇总: ${pass}/${results.length} 通过 ==========`);
+await db.close();
 if (pass !== results.length) process.exit(1);

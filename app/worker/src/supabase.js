@@ -227,43 +227,28 @@ export async function listChangeJournals(projectId) {
   }
 }
 
-export async function upsertFile(task, path, content) {
-  await ensureLease(task.id);
-  const { error } = await admin.from('ita_files').upsert(
-    {
-      project_id: task.project_id,
-      user_id: task.user_id,
-      path,
-      content,
-      deleted: false,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: 'project_id,path' }
-  );
-  if (error) throw new Error(`upsertFile failed: ${error.message}`);
+
+
+export async function completedCheckpoint(task) {
+  const { data, error } = await admin.from('ita_snapshots').select('id,verify_evidence').eq('project_id', task.project_id)
+    .eq('task_id', task.id).eq('completion_key', `${task.id}:checkpoint`).maybeSingle();
+  if (error) throw stateError('完成记录核对', error);
+  return data;
 }
 
-export async function deleteFile(task, path) {
-  await ensureLease(task.id);
-  const { error } = await admin
-    .from('ita_files')
-    .update({ deleted: true, updated_at: new Date().toISOString() })
-    .eq('project_id', task.project_id)
-    .eq('path', path);
-  if (error) throw new Error(`deleteFile failed: ${error.message}`);
-}
-
-/** 完整代码快照,Sandbox 丢失后可据此恢复。 */
-export async function saveSnapshot(task, label) {
-  await ensureLease(task.id);
-  const files = await listFiles(task.project_id);
-  const { error } = await admin.from('ita_snapshots').insert({
-    project_id: task.project_id,
-    user_id: task.user_id,
-    task_id: task.id,
-    label,
-    files,
+/** Read-only preflight; never claim a task to test migration/function availability. */
+export async function checkWorkspaceSchema(client = admin) {
+  const reads = [
+    ['ita_projects', 'workspace_revision,workspace_state,workspace_hash,workspace_epoch,workspace_writer,workspace_build,workspace_verify,checkpoint_id'],
+    ['ita_changesets', 'id,base_revision,target_hash,status'],
+    ['ita_snapshots', 'kind,workspace_revision,code_hash,completion_key'],
+    ['ita_tasks', 'base_workspace_revision,context_workspace_revision'],
+  ];
+  const results = await Promise.all(reads.map(([table, columns]) => client.from(table).select(columns, { head: true }).limit(1)));
+  for (let i = 0; i < results.length; i++) if (results[i].error) throw stateError(`工作区迁移 0006 (${reads[i][0]})`, results[i].error);
+  const { error } = await client.rpc('ita_workspace_read', {
+    p_project_id: '00000000-0000-0000-0000-000000000000', p_task_id: '00000000-0000-0000-0000-000000000000',
+    p_worker_id: config.workerId, p_execution_id: '00000000-0000-0000-0000-000000000000',
   });
-  if (error) throw new Error(`saveSnapshot failed: ${error.message}`);
-  return files.length;
+  if (!error || error.code !== 'P0001' || !error.message.includes('LEASE_LOST')) throw stateError('工作区 RPC/0006 授权', error || { message: '自检未返回预期的拒绝结果' });
 }

@@ -1,3 +1,5 @@
+import { validateRuntimeScript } from './workspace-policy.js';
+import { Workspace } from './workspace.js';
 import { logger } from './logger.js';
 import { redact } from './telemetry.js';
 
@@ -21,7 +23,7 @@ export async function recoverExistingPreview(provider, id, phase, sleep = (ms) =
   if (!await ready()) {
     // HTTP 错误时不重启已有服务，避免把运行中的错误页误判为没有进程。
     if (await provider.isPortListening(id, 5173)) throw new Error('预览服务已运行，但页面未返回成功状态；请查看应用日志');
-    await provider.startBackground(id, 'npm run dev -- --host 0.0.0.0 --port 5173 --strictPort');
+    await provider.startBackground(id, 'npm run --ignore-scripts dev -- --host 0.0.0.0 --port 5173 --strictPort');
     let up = false;
     for (let i = 0; i < 20; i++) { await sleep(2000); if (await ready()) { up = true; break; } }
     if (!up) throw new Error('开发服务未就绪；代码保留，请重试或查看沙箱日志');
@@ -32,7 +34,7 @@ export async function recoverExistingPreview(provider, id, phase, sleep = (ms) =
   return url;
 }
 
-export async function processOnePreviewRecovery({ rpc, getSandbox, workerId }) {
+export async function processOnePreviewRecovery({ rpc, getSandbox, workerId, workspaceFactory = (args) => new Workspace(args) }) {
   const { data, error } = await rpc('ita_claim_preview_recovery', { p_worker_id: workerId });
   if (error) throw new Error(`preview claim: ${error.message}`);
   const job = Array.isArray(data) ? data[0] : data;
@@ -46,7 +48,11 @@ export async function processOnePreviewRecovery({ rpc, getSandbox, workerId }) {
     if (result.data !== true) { const e = new Error('预览恢复许可已失效'); e.code = 'LEASE_LOST'; throw e; }
   };
   try {
-    const url = await recoverExistingPreview(getSandbox(), job.sandbox_id, update);
+    const provider = getSandbox();
+    const workspace = workspaceFactory({ rpc, projectId: job.project_id, workerId, executionId: job.execution_id, sandbox: provider, sandboxId: job.sandbox_id });
+    await workspace.initialize({ reconcilePending: false, wake: () => provider.ensure(job.sandbox_id, { allowRecreate: false }) });
+    if (workspace.manifest) validateRuntimeScript(workspace.manifest, 'dev');
+    const url = await workspace.runtime('preview', () => recoverExistingPreview(provider, job.sandbox_id, update));
     await update('ready', url);
     logger.info('preview.recovered', { projectId: job.project_id, sandboxId: job.sandbox_id });
     return { status: 'ready' };

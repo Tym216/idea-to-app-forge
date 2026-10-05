@@ -1,3 +1,5 @@
+> Phase 2 已将下面的 legacy steps journal 写入替换为正式 ita_changesets/workspace service。下文是 Fusion v1 的历史契约；当前恢复与发布边界以 [workspace contract](phase2-workspace-contract.md) 为准。
+
 # Action Fusion v1：先测量，再减少模型往返
 
 本轮只改 Worker，没有新增数据库迁移、依赖或前端功能。默认关闭 Fusion；请求指标在关闭时也会记录。没有接入小模型或完整的上下文压缩。

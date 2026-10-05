@@ -73,3 +73,6 @@ traces/
 
 # Opt-in local effective LLM requests and raw responses
 **/.forge-debug/
+
+# Worker/sandbox private mutation helpers are not application source
+**/.forge-workspace*/

@@ -1,3 +1,4 @@
+import { applyChanges as applyChangesFixture } from './fixtures/legacy-changes.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -34,6 +35,7 @@ function setup(actions, { buildExit = 0, verification = passed } = {}) {
     async checkLease() {},
     async appendStep(t, step) { t.steps.push(structuredClone(step)); },
     async listFiles() { return [...database].map(([path, content]) => ({ path, content })); },
+    applyChangesFixture,
     async upsertFile(_t, path, content) { database.set(path, content); },
     async updateTask() {}, async updateProject() {},
     async verifyApp() { calls.push('verify'); return verification; },

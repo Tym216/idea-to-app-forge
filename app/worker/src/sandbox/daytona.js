@@ -78,6 +78,7 @@ export class DaytonaProvider {
       await this.resolve(sandboxId);
       return { sandboxId, alive: true };
     } catch (error) {
+      if (!isNotFound(error) || owner.allowRecreate === false) throw error;
       logger.warn('daytona.ensure.recreate', { sandboxId, error: String(error?.message || error) });
       return { ...(await this.create(owner)), alive: false };
     }
@@ -241,5 +242,6 @@ export function sandboxLabels({ projectId, userId } = {}) {
 
 export function isNotFound(error) {
   const status = error?.statusCode ?? error?.status ?? error?.response?.status;
-  return status === 404 || /not\s*found|does not exist/i.test(String(error?.message || error));
+  if (status != null) return Number(status) === 404;
+  return /not\s*found|does not exist/i.test(String(error?.message || error));
 }

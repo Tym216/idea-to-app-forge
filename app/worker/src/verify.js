@@ -253,6 +253,7 @@ export async function ensureBrowser(sandbox, sandboxId) {
   if (!/READY/.test(r.stdout)) {
     const e = new Error(`浏览器验收环境安装失败: ${(r.stdout || r.stderr || '').slice(-300)}`);
     e.verifyToolError = true;
+    e.timedOut = r.timedOut === true;
     throw e;
   }
   return dir;
@@ -276,10 +277,10 @@ export async function runVerification({ sandbox, sandboxId, checks, url = VERIFY
     await sandbox.writeFile(sandboxId, `${dir}/run.mjs`, RUNNER_SOURCE);
     await sandbox.writeFile(sandboxId, `${dir}/spec.json`, JSON.stringify({ url, checks, outDir: `${dir}/shots-${stamp}` }));
     const r = await sandbox.exec(sandboxId, `cd ${dir} && node run.mjs spec.json`, { timeoutMs: 240000 });
-    if (r.timedOut) return { toolError: '验收脚本执行超时' };
+    if (r.timedOut) return { toolError: '验收脚本执行超时', timedOut: true };
     return parseRunnerOutput(r.stdout);
   } catch (error) {
-    return { toolError: String(error?.message || error).slice(0, 300) };
+    return { toolError: String(error?.message || error).slice(0, 300), ...(error?.timedOut ? { timedOut: true } : {}) };
   }
 }
 

@@ -6,7 +6,7 @@ import { initTelemetry, traceTask, shutdownTelemetry } from './telemetry.js';
 import { withExecutionControl, monitorExecution, isSupabaseError } from './execution-control.js';
 import { createTaskMetrics, metricsSnapshot } from './task-metrics.js';
 // Supabase 客户端在模块导入时创建,需在配置校验通过后再动态加载
-let claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease, executeTask, admin, getSandboxProvider, processOneDeletion, processOnePreviewRecovery;
+let checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease, executeTask, admin, getSandboxProvider, processOneDeletion, processOnePreviewRecovery;
 
 let stopping = false;
 
@@ -18,6 +18,11 @@ export function summarizeError(error, task) {
   const last = task.current_tool;
   const lastInfo = last ? `最后执行 ${last.tool},已耗时 ${Math.round(Math.max(0, performance.now() - last.started) / 1000)} 秒` : '';
   const map = {
+    WORKSPACE_PARTIAL: ['部分文件已写入，整组源码尚未确认提交', '保留原沙箱；恢复会先核对基线、目标与旧锁，只接续原请求，不重复覆盖已完成文件'],
+    WORKSPACE_RECONCILE_REQUIRED: ['工作区仍有待核对操作，已拒绝新写入或预览恢复', '先核对/恢复原任务；不能用新的 execution 或新沙箱绕过'],
+    WORKSPACE_UNCERTAIN: ['工作区操作尚未确认结束，已停止新写入', '保留源码与原沙箱；核对命令/进程及完整 manifest 后再恢复，不能直接重跑'],
+    WORKSPACE_CONFLICT: ['沙箱源码与已确认基线或预期结果不一致', '保留冲突内容，核对文件差异；不会自动覆盖'],
+    WORKSPACE_LEGACY_QUIESCENCE_REQUIRED: ['旧版写入 journal 尚未确认停止', '先停止旧 Worker 并核对原沙箱的进程、文件与旧 journal；不能绕过 fence'],
     TASK_TIMEOUT: [`任务超时(${Math.round(config.taskTimeoutMs / 60000)} 分钟)。${lastInfo}`, '可「恢复任务」沿用已写代码继续,或缩小需求后「新建任务」'],
     FIX_LIMIT_REACHED: ['构建或浏览器验收已达到修复次数上限', '查看失败步骤后「恢复任务」或补充修复要求'],
     VERIFY_BLOCKED: ['关键功能需要外部服务配置或尚无法验证', '查看验收步骤,补齐配置后恢复任务'],
@@ -110,10 +115,18 @@ async function handleTask(task) {
 
   try {
     const result = await Promise.race([run, timeout, interrupted]);
-    await updateTask(task.id, { status: 'succeeded', phase: ['success_with_warnings', 'inconclusive'].includes(result?.verificationKind) ? 'done_with_warnings' : 'done' });
+    if (!result?.completed) await updateTask(task.id, { status: 'succeeded', phase: ['success_with_warnings', 'inconclusive'].includes(result?.verificationKind) ? 'done_with_warnings' : 'done' });
     outcome = ['success_with_warnings', 'inconclusive'].includes(result?.verificationKind) ? 'succeeded_with_warnings' : 'succeeded';
     logger.info('task.finished', { taskId: task.id, status: 'succeeded', verificationKind: result?.verificationKind, previewUrl: result?.previewUrl });
   } catch (error) {
+    if (task.mode === 'build') {
+      const saved = await completedCheckpoint(task).catch(() => null);
+      if (saved) {
+        outcome = saved.verify_evidence?.status === 'passed' ? 'succeeded' : 'succeeded_with_warnings';
+        logger.info('task.completion_reconciled', { taskId: task.id, snapshotId: saved.id });
+        return;
+      }
+    }
     outcomeError = error;
     // 完成写回在执行上下文之外，仍由原 execution_id 校验；暂停不得被 failed 覆盖。
     if (!controller.signal.aborted) controller.abort(error);
@@ -166,13 +179,14 @@ async function main() {
     return;
   }
   if (modelCheck.status === 'unknown') logger.warn('worker.llm_model_unconfirmed', { provider: llmReport.selected.name, model: llmReport.selected.model, reason: modelCheck.reason || '模型列表接口不可用' });
-  ({ claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease } = await import('./supabase.js'));
+  ({ checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease } = await import('./supabase.js'));
   ({ executeTask } = await import('./agent.js'));
   ({ admin } = await import('./supabase.js'));
   ({ getSandboxProvider } = await import('./sandbox/index.js'));
   ({ processOneDeletion } = await import('./deletion.js'));
   ({ processOnePreviewRecovery } = await import('./preview-recovery.js'));
   await initTelemetry().catch(() => false);
+  await checkWorkspaceSchema();
   logger.info('worker.started', {
     workerId: config.workerId,
     provider: config.llmProvider,

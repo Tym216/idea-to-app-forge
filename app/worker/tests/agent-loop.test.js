@@ -1,3 +1,4 @@
+import { applyChanges as applyChangesFixture } from './fixtures/legacy-changes.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -42,6 +43,7 @@ function fakeDeps(actions) {
   const upserts = [];
   let i = 0;
   return {
+    applyChangesFixture,
     steps,
     upserts,
     checkLease: async () => {},
@@ -128,7 +130,7 @@ test('门槛:未构建拒绝 start_dev 与 finish;构建+预览后 finish 成功
   assert.match(finishedSteps(deps)[1].observation, /不能 finish/);
   assert.match(finishedSteps(deps)[3].observation, /尚未启动开发服务器/);
   assert.match(finishedSteps(deps)[5].observation, /尚未取得浏览器验收结果/);
-  assert.ok(sandbox.calls.includes('npm install --no-audit --no-fund && npm run build'));
+  assert.ok(sandbox.calls.includes('npm install --no-audit --no-fund --ignore-scripts --package-lock=true && npm run build'));
   assert.ok(sandbox.calls.includes(`bg:${DEV_CMD}`));
 });
 
@@ -171,19 +173,15 @@ test('重复失败:read_file 同参数连续失败返回文件列表并以 AGENT
   assert.match(finishedSteps(deps)[1].observation, /不要重复/);
 });
 
-test('脚手架入库:hydrateSandbox 对缺失的脚手架文件调用 upsertFile', async () => {
-  const deps = fakeDeps([]);
-  await hydrateSandbox(newTask(), fakeSandbox(), 's', [{ path: 'src/App.tsx', content: 'x' }], deps);
-  const expected = Object.keys(SCAFFOLD_FILES).filter((p) => p !== 'src/App.tsx').sort();
-  assert.deepEqual([...deps.upserts].sort(), expected);
+test('脚手架通过 workspace system Change Set，不走直接文件 upsert', async () => {
+  const changes=[];
+  await hydrateSandbox({manifest:{files:[{path:'src/App.tsx',content:'x'}]},apply:async (items,opts)=>{changes.push({items,opts});}});
+  assert.equal(changes[0].opts.origin,'scaffold');
+  assert.ok(changes[0].items.some((c)=>c.path==='package.json'));
+  assert.ok(!changes[0].items.some((c)=>c.path==='src/App.tsx'));
 });
 
-test('upsertFile 写入 deleted:false', async () => {
-  const { readFile } = await import('node:fs/promises');
-  const src = await readFile(new URL('../src/supabase.js', import.meta.url), 'utf8');
-  const body = src.slice(src.indexOf('export async function upsertFile'), src.indexOf('export async function deleteFile'));
-  assert.match(body, /deleted: false/);
-});
+
 
 test('Build 提交弱断言被拒绝;验收只执行计划绑定的检查', async () => {
   let checksSeen;

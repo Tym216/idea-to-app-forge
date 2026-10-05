@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyChanges, reconcileChanges, validateChanges, hashContent, pendingChanges } from '../src/apply-changes.js';
+import { applyChanges, reconcileChanges, pendingChanges } from './fixtures/legacy-changes.js';
+import { validateChanges, hashContent } from '../src/apply-changes.js';
 
 function fixture({ failDatabase = false, timeoutAfterWrite = false } = {}) {
   const disk = new Map([['src/App.tsx', 'old']]);

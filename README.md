@@ -62,6 +62,7 @@ flowchart LR
 | 3 | [0003_deletion_retention.sql](app/backend/migrations/0003_deletion_retention.sql) | 项目清理、偏好建议、反馈与审计 |
 | 4 | [0004_task_pause.sql](app/backend/migrations/0004_task_pause.sql) | 暂停、继续与执行失效 |
 | 5 | [0005_preview_recovery.sql](app/backend/migrations/0005_preview_recovery.sql) | 已有沙箱的预览恢复队列 |
+| 6 | [0006_workspace_contract.sql](app/backend/migrations/0006_workspace_contract.sql) | 统一源码 Change Set、revision、证据与 checkpoint |
 
 升级已有数据库时，先停止旧 Worker，再执行尚未应用的迁移、更新源码并重启；不要重新初始化已有业务数据。`Success. No rows returned` 说明 SQL 已执行，不代表整个应用已完成验收。
 
@@ -246,9 +247,9 @@ node preview-recovery.test.mjs
 
 | 验证项 | 截至本次核对的结果与边界 |
 |---|---|
-| Worker | 全量 **169/169** 通过，语法检查通过；主要为本地单元和替身服务测试 |
+| Worker | 全量 **192/192** 通过，语法检查通过；主要为本地单元和替身服务测试 |
 | 数据库基础、计划、暂停、预览恢复 | PGlite 测试通过，不能代替 Supabase 云端全流程验收 |
-| 数据库删除测试 | **未通过**：`ita_complete_project_deletion` 调用参数与当前迁移签名不一致，执行中断 |
+| 数据库删除测试 | PGlite **51/51** 通过：补齐测试调用的 p_attempts，实际加载 0001–0006，覆盖 legacy 与新 changeset/checkpoint 的级联删除；真实 Supabase 尚未验证 |
 | 前端 | 已通过本地 lint/build；`/ui-mock` 为模拟展示，不能作为真实生成证据 |
 | 浏览器检查 | 曾对预写的占位页、空网格、正常游戏和待办 fixture 做 Chromium 检查；不是模型生成成功率测试 |
 | 真实链路 | 实际调用过智谱、Supabase、Daytona，已有可交互推箱子和 Langfuse 记录；近期新任务仍出现失败 |
@@ -288,7 +289,7 @@ docker logs -f forge-worker
 | 停止后页面仍显示运行 | 看 `task.fail_write_rejected`。小数毫秒写入 integer 列的问题已修复；其他网络或数据库写回错误仍需核对 |
 | 模型 429 / `1113` | 检查所选模型、余额与资源包；不会自动切换供应商 |
 | `SANDBOX_NOT_RUNNING` / 502 | 从工作区触发恢复并确认 Worker 在线；沙箱删除或服务启动失败需另行处理 |
-| 找不到 RPC / schema cache 错误 | 核对同一 Supabase 项目是否依序执行 0001–0005，以及 Worker 是否更新 |
+| 找不到 RPC / schema cache 错误 | 核对同一 Supabase 项目是否依序执行 0001–0006，以及 Worker 是否更新 |
 | 预览可玩但验收失败 | 区分应用缺陷、浏览器工具故障及计划断言错误；错误选择器也会让正确页面无法通过检查 |
 | 生成质量与成本 | 简单任务也可能多次读写和重写长文件；没有系统测量的成功率、P95 延迟或成本保证 |
 | 恢复与扩展 | 恢复依赖已保存文件，不保证任意外部副作用“恰好一次”；多 Worker 扩容、团队协作、额度计费未完成 |
@@ -319,3 +320,14 @@ Verify 将页面打不开、占位页或运行时崩溃等有明确证据的故�
 ### LLM 请求阶段诊断
 
 模型日志区分响应头未返回、正文读取和协议处理阶段；可选的本地 effective request/raw response capture 默认关闭，配置与保存边界见 [LLM 诊断说明](docs/llm-diagnostics.md)。
+
+
+### Workspace Phase 2
+
+源码写入、删除、脚手架及设计 tokens 统一经过 Change Set；安装生成的 package-lock.json 也会显式提交。恢复 confirmed revision 不增加编号。构建和浏览器证据按源码 revision/hash 与实际依据复用，Worker 重启本身不要求重跑。
+
+**已有项目切换前先阅读 [切换说明](docs/workspace-cutover.md)**：必须停止旧 Worker、确认远程操作收尾，再执行 0006。未确认的旧 journal 或未知 source drift 不会被自动覆盖。首版 managed source 仅支持有上限的 UTF-8 文本，任意 shell/native lifecycle hooks 暂未开放；checkpoint 不能带 blocker/tool_error 发布。
+
+Phase 2 的 SQL/service/gateway 检查已在本地验证；真实 Supabase、PostgreSQL 并发与 Daytona 联调尚未验证。没有新增 App Version UI 或历史预览。
+
+删除测试 harness 已补齐 `p_attempts`，并实际加载 0001–0006：51/51 通过。删除业务逻辑未修改；真实 service-role 权限、PostgreSQL 双连接并发和 Daytona 链路仍需在独立 disposable 环境验证，主要环境尚未 cutover。

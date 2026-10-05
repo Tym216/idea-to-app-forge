@@ -95,6 +95,14 @@ async function checkSupabase() {
     }
   }
 
+  try {
+    const { checkWorkspaceSchema } = await import('./supabase.js');
+    await checkWorkspaceSchema(admin);
+    ok('Workspace 0006 字段与只读 RPC 自检通过（未领取任务）');
+  } catch (error) {
+    bad(String(error.message), '停止旧 Worker，依序执行 0001–0006；不要重跑旧迁移，核对 service_role 授权与 schema cache');
+  }
+
   // 用随机 task_id 调用心跳:不会命中任何任务,只验证 service_role 的 EXECUTE 权限
   const { error } = await admin.rpc('ita_heartbeat_task', {
     p_task_id: '00000000-0000-0000-0000-000000000000',

@@ -1,5 +1,8 @@
+import { validateRuntimeScript } from './workspace-policy.js';
 import { config } from './config.js';
-import { applyChanges, reconcileChanges, validateChanges } from './apply-changes.js';
+import { Workspace, shellQuote } from './workspace.js';
+import { sourceManifest, buildFingerprint, verifyFingerprint, sha256, sourceError, normalizeSourcePath, isManagedPath } from './managed-source.js';
+import { validateChanges } from './apply-changes.js';
 import { recordToolCall, recordOperation } from './task-metrics.js';
 import { assertExecutionActive, guardedSandbox, isSupabaseError, rethrowExecutionControl } from './execution-control.js';
 import { logger } from './logger.js';
@@ -10,36 +13,33 @@ import { loadMemories, renderMemories, extractMemories, upsertMemory } from './m
 import { AgentStopError, BuildProgress, mayModifyCode, verificationAttempts, requireVerificationBudget, requireNewRevisionForVerification, MAX_VERIFY_ATTEMPTS } from './build-progress.js';
 import { DESIGN_TOKENS_PATH, renderDesignPrompt, renderDesignTokensCss, resolveDesign } from './design.js';
 import { checkSandboxDependencies } from './deps-check.js';
-import { VERIFY_SPEC, validateChecks, runVerification, classifyResult, formatObservation, composeSummary } from './verify.js';
+import { VERIFY_SPEC, RUNNER_SOURCE, PLAYWRIGHT_VERSION, validateChecks, runVerification, classifyResult, formatObservation, composeSummary } from './verify.js';
 import { withObservation, redact } from './telemetry.js';
 import {
   ACTION_PROMPT, PLAN_PROMPT, applyToolResult, generateStructured, initialStages, markRunning,
   renderAcceptance, renderApprovedPlan, validateAcceptance, validateAction, validatePlan,
 } from './planner.js';
 import {
+  admin,
   addMessage,
   appendStep,
   getLatestPlanVersion,
   getLatestPlan,
-  deleteFile,
   getPlan,
   getProject,
   listFeedback,
   savePlan,
   listFiles,
-  listChangeJournals,
   ensureLease,
-  saveSnapshot,
   updateProject,
   updateTask,
-  upsertFile,
 } from './supabase.js';
 
-const defaultDeps = { chat, appendStep, updateTask, updateProject, upsertFile, deleteFile, savePlan, addMessage, getLatestPlanVersion, listFiles, listChangeJournals, checkLease: null };
+const defaultDeps = { chat, appendStep, updateTask, updateProject, savePlan, addMessage, getLatestPlanVersion, listFiles, checkLease: null };
 
-export const INSTALL_CMD = 'npm install --no-audit --no-fund';
+export const INSTALL_CMD = 'npm install --no-audit --no-fund --ignore-scripts --package-lock=true';
 export const BUILD_CMD = `${INSTALL_CMD} && npm run build`;
-export const DEV_CMD = 'npm run dev';
+export const DEV_CMD = 'npm run --ignore-scripts dev';
 
 const FUSION_SPEC = `
 apply_changes（启用时）一次提交已确定的完整文件修改，可接构建：
@@ -62,7 +62,7 @@ ${VERIFY_SPEC}
 {"thought":"...","tool":"request_plan_revision","args":{"reason":"计划中的验收条件为什么需要调整"}}
 {"thought":"...","tool":"finish","args":{"summary":"给用户看的一段中文说明"}}
 规则:
-- 沙箱只有 npm,不要使用 pnpm 或 yarn。
+- 沙箱只有 npm；run_command 首版仅允许 npm install，源码改动必须使用文件工具；不要执行任意 shell 改写或 detached writer。
 - read_file 按 offset 分段返回(默认 4000 字符);若提示已截断,继续读取下一段,修改前应看完相关文件。
 - write_file 必须给出文件完整内容,不能用省略号或 diff;文件路径必须完整(如 package.json)。
 - 脚手架已包含 package.json / vite.config.ts / index.html / src/main.tsx,通常只需修改 src 下的业务文件。
@@ -95,6 +95,8 @@ export function previousVerificationFailure(task) {
   return `上次浏览器验收失败（手动重试时优先定位此问题，不要重做整个应用）：\n${String(previous.observation).slice(0, 1800)}\n如果是验收定义错误，调用 request_plan_revision 停止并请求修订计划；不能擅改已批准的断言。`;
 }
 
+export function genericProjectContext(_project, _task) { return { profile: 'generic', instructions: [] }; }
+
 async function buildContext(task, project, files, memories) {
   const memoryText = renderMemories(memories);
   const codeDigest = files.length
@@ -110,6 +112,7 @@ async function buildContext(task, project, files, memories) {
     `项目已确认需求: ${project.description || '(暂无)'}`,
     '',
     memoryText,
+    ...genericProjectContext(project, task).instructions,
     '',
     '当前已有代码:',
     codeDigest,
@@ -122,14 +125,17 @@ async function buildContext(task, project, files, memories) {
 /** 执行单个工具,返回 { observation, ok }。AgentStopError 向上抛出,由循环层终止。 */
 async function runTool(ctx, tool, args) {
   const { task, sandbox, sandboxId, progress } = ctx;
+  if (ctx.workspace) await ctx.workspace.assertCurrent(ctx.contextRevision);
   switch (tool) {
     case 'list_files': {
-      const paths = await sandbox.listFiles(sandboxId, sandbox.workdir);
+      const paths = ctx.workspace ? ctx.workspace.manifest.files.map((f) => f.path) : await sandbox.listFiles(sandboxId, sandbox.workdir);
       return { observation: paths.join('\n') || '(空)', ok: true };
     }
     case 'read_file': {
       try {
-        const content = await sandbox.readFile(sandboxId, args.path);
+        const filePath = normalizeSourcePath(args.path);
+        if (!isManagedPath(filePath)) throw sourceError('SOURCE_PATH', '不能读取私密或运行目录');
+        const content = await sandbox.readFile(sandboxId, filePath);
         const offset = args.offset == null ? 0 : Number(args.offset);
         if (!Number.isInteger(offset) || offset < 0 || offset > content.length) return { observation: 'offset 必须是文件内的非负整数', ok: false };
         const limit = Math.min(4500, Math.max(1, Number(args.limit) || 4000));
@@ -153,7 +159,9 @@ async function runTool(ctx, tool, args) {
       const extra = changes.length - 1 + (after === 'build' ? 1 + automaticValidationSteps(ctx) : 0);
       if (task.tool_steps + extra > config.maxToolSteps) throw new AgentStopError('TOOL_STEP_LIMIT', '预算不足以执行这组修改；尚未写入任何文件');
       let result;
-      try { result = await applyChanges({ task, sandbox, sandboxId, changes, deps: ctx.deps,
+      try { result = await (ctx.workspace
+        ? (params) => ctx.workspace.apply(changes, { ...params, baseRevision: ctx.contextRevision })
+        : ctx.deps.applyChangesFixture)({ task, sandbox, sandboxId, changes, deps: ctx.deps,
         invalidate: () => progress.invalidate(),
         beforeWrite: async (index, filePath) => {
           assertExecutionActive();
@@ -175,6 +183,7 @@ async function runTool(ctx, tool, args) {
         if (after === 'build' && error.operations) error.operations.push({ kind: 'build', status: 'not_run' });
         throw error;
       }
+      if (ctx.workspace) ctx.contextRevision = ctx.workspace.state.revision;
       if (after === 'build') {
         let built;
         try { built = await executeOperation(ctx, 'build', {}, true); }
@@ -194,14 +203,28 @@ async function runTool(ctx, tool, args) {
       return { observation: JSON.stringify(result), ok: true };
     }
     case 'delete_file': {
+      if (ctx.workspace) {
+        const r = await ctx.workspace.apply([{ operation: 'delete', path: args.path }], { baseRevision: ctx.contextRevision });
+        ctx.lastDeleteChanged = r.changed;
+        if (r.changed) progress.invalidate();
+        ctx.contextRevision = ctx.workspace.state.revision;
+        return { observation: `已确认删除 ${args.path}`, ok: true };
+      }
       const existing = await sandbox.listFiles(sandboxId, sandbox.workdir);
       ctx.lastDeleteChanged = existing.includes(args.path);
-      await sandbox.exec(sandboxId, `rm -f ${JSON.stringify(args.path)}`, { timeoutMs: 20000 });
       await ctx.deps.deleteFile(task, args.path);
       progress.invalidate();
       return { observation: `已删除 ${args.path}`, ok: true };
     }
     case 'run_command': {
+      if (ctx.workspace) {
+        if (!/^npm (?:install|i)(?: --no-audit)?(?: --no-fund)?(?: --ignore-scripts)?$/.test(args.command.trim())) return { observation: '当前只允许受控 npm install；源码改动请使用 write_file/apply_changes/delete_file。任意 shell 改写暂未开放。', ok: false };
+        const rev = ctx.workspace.state.revision;
+        const r = await ctx.workspace.runtime('install', () => runCommand(sandbox, sandboxId, INSTALL_CMD), { adoptLockfile: true });
+        if (ctx.workspace.state.revision !== rev) progress.invalidate();
+        ctx.contextRevision = ctx.workspace.state.revision;
+        return { observation: formatResult(r), ok: r.exitCode === 0 };
+      }
       if (mayModifyCode(args.command)) progress.invalidate();
       const result = await runCommand(sandbox, sandboxId, args.command);
       return { observation: formatResult(result), ok: result.exitCode === 0 };
@@ -211,9 +234,21 @@ async function runTool(ctx, tool, args) {
       if (task.tool_steps + automaticValidationSteps(ctx) > config.maxToolSteps) {
         throw new AgentStopError('TOOL_STEP_LIMIT', '预算不足以完成构建后的启动与验收；尚未执行构建');
       }
+      if (ctx.workspace && ctx.workspace.valid('build', ctx.buildBasis) && ctx.workspace.state.build.status === 'passed') {
+        progress.recordBuild(true);
+        return { observation: '复用当前源码和构建依据的已成功证据，未重新构建。', ok: true, reused: true };
+      }
       const depsGate = await checkSandboxDependencies(sandbox, sandboxId);
       if (depsGate) return { observation: depsGate, ok: false };
-      const result = await runCommand(sandbox, sandboxId, BUILD_CMD);
+      let result;
+      if (ctx.workspace) {
+        const installed = await ctx.workspace.runtime('install', () => runCommand(sandbox, sandboxId, INSTALL_CMD), { adoptLockfile: true });
+        ctx.contextRevision = ctx.workspace.state.revision;
+        if (installed.exitCode !== 0) return { observation: formatResult(installed), ok: false };
+        validateRuntimeScript(ctx.workspace.manifest, 'build');
+        result = await ctx.workspace.runtime('build', () => runCommand(sandbox, sandboxId, 'npm run --ignore-scripts build'));
+        await ctx.workspace.evidence('build', ctx.buildBasis, result.exitCode === 0 ? 'passed' : 'failed', { exitCode: result.exitCode });
+      } else result = await runCommand(sandbox, sandboxId, BUILD_CMD);
       let observation = formatResult(result);
       const ok = result.exitCode === 0;
       progress.recordBuild(ok); // 超限时抛 AgentStopError
@@ -229,6 +264,24 @@ async function runTool(ctx, tool, args) {
     case 'start_dev': {
       const blocked = progress.canStartDev();
       if (blocked) return { observation: blocked, ok: false };
+      if (ctx.workspace) {
+        validateRuntimeScript(ctx.workspace.manifest, 'dev');
+        const installed = await sandbox.exec(sandboxId, 'test -x node_modules/.bin/vite', { timeoutMs: 20000 });
+        if (installed.timedOut) throw sourceError('WORKSPACE_ENVIRONMENT', '无法确认预览依赖状态，未启动');
+        if (installed.exitCode !== 0) {
+          const revision = ctx.workspace.state.revision;
+          const command = ctx.workspace.manifest.files.some((f) => f.path === 'package-lock.json')
+            ? 'npm ci --no-audit --no-fund --ignore-scripts' : INSTALL_CMD;
+          const r = await ctx.workspace.runtime('install', () => runCommand(sandbox, sandboxId, command), { adoptLockfile: true });
+          ctx.contextRevision = ctx.workspace.state.revision;
+          if (r.exitCode !== 0) return { observation: formatResult(r), ok: false };
+          if (revision !== ctx.contextRevision) {
+            progress.invalidate();
+            return { observation: '预览依赖恢复产生了真实 lockfile 变化，请先构建当前 revision。', ok: false };
+          }
+        }
+      }
+      const start = async () => {
       await sandbox.exec(sandboxId, 'pkill -f "vite" || true', { timeoutMs: 20000 });
       const { commandId } = await sandbox.startBackground(sandboxId, DEV_CMD);
       let ready = false;
@@ -245,6 +298,13 @@ async function runTool(ctx, tool, args) {
       await ctx.deps.updateProject(task.project_id, task.user_id, { preview_url: previewUrl, sandbox_id: sandboxId }, task.id);
       logger.info('preview.written', { taskId: task.id, projectId: task.project_id, sandboxId, previewUrl });
       return { observation: `开发服务器已启动,预览地址: ${previewUrl}`, ok: true };
+      };
+      const r = ctx.workspace ? await ctx.workspace.runtime('start', start) : await start();
+      if (ctx.workspace?.valid('verify', ctx.verifyBasis) && ctx.workspace.state.verify.result) {
+        ctx.verificationResult = ctx.workspace.state.verify.result;
+        progress.recordVerification(ctx.verificationResult);
+      }
+      return r;
     }
     case 'verify': {
       const blocked = progress.canVerify();
@@ -252,13 +312,23 @@ async function runTool(ctx, tool, args) {
       if (Object.keys(args).length) return { observation: 'verify 不接受检查参数;检查由已保存的计划版本固定。请用空 args 重试。', ok: false };
       const checks = ctx.acceptance.filter((a) => a.steps?.length).map(({ id, steps }) => ({ id, steps }));
       const validated = validateChecks(ctx.acceptance, checks);
+      if (ctx.workspace?.valid('verify', ctx.verifyBasis)) {
+        const previous = ctx.workspace.state.verify;
+        if (['passed', 'success_with_warnings', 'inconclusive'].includes(previous.status)) {
+          ctx.verificationResult = previous.result; progress.recordVerification(previous.result);
+          return { observation: '复用当前 revision/验收依据的浏览器结论，未重新验收。', ok: true, reused: true };
+        }
+        throw new AgentStopError('VERIFY_REVISION_UNCHANGED', '当前源码和验收依据已有失败结论；请先实际修复源码或修订计划，不重复 verify。');
+      }
       requireVerificationBudget(task);
-      requireNewRevisionForVerification(task);
+      if (!ctx.workspace) requireNewRevisionForVerification(task);
       const attempt = verificationAttempts(task.steps) + 1;
       await ctx.deps.appendStep(task, { tool: 'verify_attempt', phase: 'verify', event: 'started',
         observation: `第 ${attempt}/${MAX_VERIFY_ATTEMPTS} 次浏览器验收；失败后等待用户决定，不自动修复` });
-      const raw = await (ctx.deps.verifyApp || runVerification)({ sandbox, sandboxId, checks: validated.checks });
+      const verify = () => (ctx.deps.verifyApp || runVerification)({ sandbox, sandboxId, checks: validated.checks });
+      const raw = ctx.workspace ? await ctx.workspace.runtime('verify', verify) : await verify();
       const result = classifyResult(raw, ctx.acceptance);
+      if (ctx.workspace) await ctx.workspace.evidence('verify', ctx.verifyBasis, result.kind, result);
       ctx.verificationResult = result;
       progress.recordVerification(result);
       await ctx.deps.appendStep(task, { tool: 'verify_report', phase: 'verify',
@@ -288,6 +358,7 @@ async function runTool(ctx, tool, args) {
  * - 构建修复轮数上限 config.maxFixRounds(二者分别配置)
  */
 export async function runBuild(task, project, sandbox, sandboxId, context, deps = defaultDeps, designPrompt = '', acceptance = [], options = {}) {
+  if (deps === defaultDeps && !options.workspace) throw sourceError('WORKSPACE_REQUIRED', '生产 Build 必须使用统一 workspace service');
   let canonicalAcceptance;
   try { canonicalAcceptance = validateAcceptance(acceptance); }
   catch (error) { throw new AgentStopError('PLAN_REVISION_REQUIRED', `验收检查缺失或无效,请创建新 Plan 并审阅: ${error.message}`); }
@@ -303,7 +374,9 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
   const progress = new BuildProgress({ maxFixRounds: config.maxFixRounds, fixRounds: task.fix_rounds || 0 });
   const ctx = { task, sandbox, sandboxId, progress, previewUrl: '',
     deps: { ...deps, checkLease: deps.checkLease || (() => ensureLease(task.id)) },
-    acceptance: canonicalAcceptance, verificationResult: null, fusionEnabled, runtimePolicy };
+    acceptance: canonicalAcceptance, verificationResult: null, fusionEnabled, runtimePolicy, workspace: options.workspace,
+    contextRevision: options.workspace?.state.revision, buildBasis: options.buildBasis, verifyBasis: options.verifyBasis };
+  if (ctx.workspace?.valid('build', ctx.buildBasis) && ctx.workspace.state.build.status === 'passed') progress.recordBuild(true);
 
 
   const stages = Array.isArray(task.plan) && task.plan.length && task.plan[0]?.key ? task.plan : initialStages();
@@ -313,6 +386,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
   while (task.tool_steps < config.maxToolSteps) {
     assertExecutionActive();
     if (task.aborted) throw new AgentStopError('ABORTED', task.aborted);
+    if (ctx.workspace) await ctx.workspace.assertCurrent(ctx.contextRevision);
     task.current_tool = null;
     await ctx.deps.updateTask(task.id, { phase: 'deciding' });
     const raw = await ctx.deps.chat(history, { temperature: 0.1, json: true, reasoningMode: 'off', interactionMode: 'json_action', taskId: task.id,
@@ -365,6 +439,10 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
       if (!blocked) {
         const summary = composeSummary(args.summary || '已完成本轮修改。', ctx.verificationResult);
         await ctx.deps.appendStep(task, { tool, phase: 'finishing', observation: summary });
+        if (ctx.workspace) {
+          await ctx.workspace.assertCurrent(ctx.contextRevision);
+          await ctx.workspace.runtime('checkpoint', async () => ({}));
+        }
         return { summary, previewUrl: ctx.previewUrl, verificationKind: ctx.verificationResult?.kind };
       }
       history.push({ role: 'user', content: `观察结果:\n${blocked}` });
@@ -400,7 +478,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
       if (task.aborted) throw new AgentStopError('ABORTED', task.aborted);
     } catch (error) {
       assertExecutionActive();
-      if (error?.code === 'LEASE_LOST' || isSupabaseError(error)) throw error;
+      if (error?.code === 'LEASE_LOST' || isSupabaseError(error) || /^(WORKSPACE|SOURCE|CHECKPOINT)_/.test(error?.code || '')) throw error;
       if (error instanceof AgentStopError) {
         // Automatic child failure must not relabel successful writes/build as failed.
         if (!parentSucceeded && (task.current_tool?.tool === tool || error.code === 'CHANGE_UNCERTAIN')) {
@@ -471,7 +549,9 @@ async function executeOperation(ctx, tool, args, automatic) {
   assertExecutionActive();
   await ctx.deps.checkLease();
   if (automatic) consumeStep(ctx);
-  if (!['write_file', 'apply_changes'].includes(tool)) recordOperation(tool);
+  const reuse = tool === 'build' && ctx.workspace?.valid('build', ctx.buildBasis) && ctx.workspace.state.build.status === 'passed'
+    || tool === 'verify' && ctx.workspace?.valid('verify', ctx.verifyBasis) && ['passed','success_with_warnings','inconclusive'].includes(ctx.workspace.state.verify.status);
+  if (!reuse && !['write_file', 'apply_changes'].includes(tool)) recordOperation(tool);
   if (automatic) {
     markRunning(ctx.task.plan, tool);
     ctx.task.current_tool = { tool, started: performance.now() };
@@ -488,7 +568,7 @@ async function executeOperation(ctx, tool, args, automatic) {
       : await runTool(ctx, tool, args);
     assertExecutionActive();
     await ctx.deps.checkLease();
-    recordOperation(tool, tool === 'verify' ? ctx.verificationResult?.kind === 'passed' : result.ok);
+    if (!result.reused) recordOperation(tool, tool === 'verify' ? ctx.verificationResult?.kind === 'passed' : result.ok);
     if (!['write_file', 'apply_changes'].includes(tool)) {
       applyToolResult(ctx.task.plan, tool, result.ok, result.observation.slice(0, 120));
     }
@@ -554,17 +634,11 @@ function formatResult(result) {
     .join('\n');
 }
 
-/** 确保沙箱内存在脚手架与数据库中已有的代码;补写的脚手架同步保存到数据库。 */
-export async function hydrateSandbox(task, sandbox, sandboxId, files, deps = defaultDeps) {
-  for (const [path, content] of Object.entries(SCAFFOLD_FILES)) {
-    if (!files.some((f) => f.path === path)) {
-      await sandbox.writeFile(sandboxId, path, content);
-      await deps.upsertFile(task, path, content);
-    }
-  }
-  for (const file of files) {
-    await sandbox.writeFile(sandboxId, file.path, file.content);
-  }
+/** Scaffold is a logical mutation; hydration itself only materializes an existing revision. */
+export async function hydrateSandbox(workspace) {
+  const changes = Object.entries(SCAFFOLD_FILES).filter(([path]) => !workspace.manifest.files.some((f) => f.path === path))
+    .map(([path, content]) => ({ operation: 'write', path, content }));
+  if (changes.length) await workspace.apply(changes, { origin: 'scaffold' });
 }
 
 /** Build 前确定执行依据:已批准的计划版本 + 反馈;直接 Build 时生成简短行动计划(视为授权)。 */
@@ -605,14 +679,29 @@ export async function resolveBuildBasis(task, context, deps) {
 
 export async function executeTask(task) {
   const deps = { ...defaultDeps, getPlan, listFeedback, checkLease: () => ensureLease(task.id) };
-  // Reconcile against the ORIGINAL sandbox before hydration or spending more model tokens.
+  let workspace, sandbox, sandboxId;
   if (task.mode === 'build') {
     await updateTask(task.id, { phase: 'reconciling' });
-    await reconcileChanges({ task, sandbox: guardedSandbox(getSandboxProvider('daytona')), deps });
+    const existing = await getProject(task.project_id, task.user_id);
+    sandbox = guardedSandbox(getSandboxProvider('daytona'));
+    workspace = new Workspace({ rpc: admin.rpc.bind(admin), projectId: task.project_id, taskId: task.id, workerId: config.workerId, executionId: task.execution_id, sandbox, sandboxId: existing.sandbox_id });
+    await workspace.read();
+    if (workspace.state.writer) {
+      if (workspace.state.writer.kind === 'legacy') throw sourceError('WORKSPACE_LEGACY_QUIESCENCE_REQUIRED', '旧 journal 尚未确认停止；保留原沙箱并人工核对');
+      if (!existing.sandbox_id || existing.sandbox_id !== workspace.state.writer.sandbox_id) throw sourceError('WORKSPACE_UNCERTAIN', '待核对操作的原沙箱与项目绑定不一致');
+      await sandbox.ensure(existing.sandbox_id, { projectId: task.project_id, userId: task.user_id, allowRecreate: false });
+      await workspace.reconcile();
+    }
+    const ensured = await sandbox.ensure(existing.sandbox_id, { projectId: task.project_id, userId: task.user_id });
+    sandboxId = ensured.sandboxId;
+    workspace.sandboxId = sandboxId;
+    workspace.gateway.id = sandboxId;
+    await updateProject(task.project_id, task.user_id, { sandbox_id: sandboxId, status: 'running' }, task.id);
+    await workspace.initialize({ newSandbox: !ensured.alive });
   }
   await updateTask(task.id, { phase: 'understand' });
   const project = await getProject(task.project_id, task.user_id);
-  const files = await listFiles(task.project_id);
+  const files = workspace ? workspace.manifest.files : sourceManifest(await listFiles(task.project_id)).files;
   const memories = await loadMemories(task.user_id, task.project_id);
   const context = await buildContext(task, project, files, memories);
 
@@ -636,26 +725,35 @@ export async function executeTask(task) {
   const basis = await resolveBuildBasis(task, context, deps);
 
   await updateTask(task.id, { phase: 'sandbox' });
-  const sandbox = guardedSandbox(getSandboxProvider('daytona'));
-  const { sandboxId, alive } = await sandbox.ensure(project.sandbox_id, { projectId: task.project_id, userId: task.user_id });
-  await updateProject(task.project_id, task.user_id, { sandbox_id: sandboxId, status: 'running' }, task.id);
-  if (!alive) {
-    await appendStep(task, { tool: 'sandbox', phase: 'sandbox', observation: '沙箱不存在或已回收,正在从数据库快照恢复代码。' });
-  }
-  await hydrateSandbox(task, sandbox, sandboxId, files);
-  const tokensCss = renderDesignTokensCss(design);
-  await sandbox.writeFile(sandboxId, DESIGN_TOKENS_PATH, tokensCss);
-  await upsertFile(task, DESIGN_TOKENS_PATH, tokensCss);
-
+  await hydrateSandbox(workspace);
+  await workspace.apply([{ operation: 'write', path: DESIGN_TOKENS_PATH, content: renderDesignTokensCss(design) }], { origin: 'design' });
+  const runtime = await buildRuntimeBasis(sandbox, sandboxId);
+  const buildBasis = buildFingerprint(runtime);
+  const verifyBasis = verifyFingerprint(basis.acceptance, { runnerHash: sha256(RUNNER_SOURCE), playwrightVersion: PLAYWRIGHT_VERSION, buildBasis });
   await updateTask(task.id, { phase: 'react' });
   const { summary, previewUrl, verificationKind } = await runBuild(
     task, project, sandbox, sandboxId, context, deps, `${basis.prompt}\n\n${renderDesignPrompt(design)}`, basis.acceptance,
-    { planChars: basis.prompt.length, runtimePolicy: webValidationPolicy(basis.plan, config.actionFusionEnabled) }
+    { planChars: basis.prompt.length, runtimePolicy: webValidationPolicy(basis.plan, config.actionFusionEnabled), workspace, buildBasis, verifyBasis }
   );
 
-  await saveSnapshot(task, `task ${task.id}`);
-  await addMessage(task, 'assistant', summary, { previewUrl });
-  await updateProject(task.project_id, task.user_id, { status: 'ready', preview_url: previewUrl || project.preview_url }, task.id);
   await extractMemories({ userId: task.user_id, projectId: task.project_id, userPrompt: task.prompt, summary, taskId: task.id });
-  return { summary, previewUrl, verificationKind };
+  await workspace.runtime('checkpoint', async () => ({}));
+  const finalBasis = buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId));
+  if (finalBasis !== buildBasis) throw sourceError('WORKSPACE_EVIDENCE_STALE', '构建环境已变更；不能沿用旧证据完成');
+  const completion = {
+    p_key: `${task.id}:checkpoint`, p_revision: workspace.state.revision, p_hash: workspace.manifest.code_hash,
+    p_build_basis: buildBasis, p_verify_basis: verifyBasis, p_basis_id: basis.plan.id, p_summary: summary,
+    p_preview_url: previewUrl || project.preview_url,
+  };
+  // This single DB transaction creates snapshot/message/project outcome/task terminal state.
+  const checkpoint = await workspace.call('ita_complete_build_checkpoint', completion);
+  return { summary, previewUrl, verificationKind, completed: checkpoint.completed };
+}
+
+export async function buildRuntimeBasis(sandbox, sandboxId) {
+  const js = `const fs=require('node:fs'),c=require('node:crypto'); const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>['NODE_ENV','NODE_OPTIONS'].includes(k)||k.startsWith('VITE_')).sort(([a],[b])=>a.localeCompare(b))); const files=fs.readdirSync('.').filter(p=>/^\\.env(?:\\..*)?$/.test(p)&&p!=='.env.example').sort().map(p=>[p,fs.readFileSync(p).toString('base64')]); console.log(JSON.stringify({nodeVersion:process.version,platform:process.platform,arch:process.arch,environmentHash:c.createHash('sha256').update(JSON.stringify({env,files})).digest('hex')}));`;
+  const r = await sandbox.exec(sandboxId, `node -e ${shellQuote(js)}`, { timeoutMs: 20000 });
+  const npm = await sandbox.exec(sandboxId, 'npm --version', { timeoutMs: 20000 });
+  if (r.exitCode !== 0 || r.timedOut || npm.exitCode !== 0 || npm.timedOut) throw sourceError('WORKSPACE_ENVIRONMENT', '无法取得真实构建环境依据');
+  return { ...JSON.parse(r.stdout.trim()), npmVersion: npm.stdout.trim(), command: 'npm run --ignore-scripts build', installCommand: INSTALL_CMD };
 }
