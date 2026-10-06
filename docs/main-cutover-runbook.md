@@ -1,16 +1,16 @@
-# 主要环境 Phase 2 cutover runbook — 待确认，未执行
+# 主要环境 Phase 2 cutover runbook — 方向已确认，当前 NO-GO
 
-核对日期：2026-10-06。主项目 `vfzyimhapttcdxeabvur`；保留的 rehearsal 项目 `forge-cutover-test / dfixexlufeyrdublqcxu`。本文件是批准前的执行计划，不是执行记录。不得将 disposable 的连接、脚本或固定 ref 改一下就直接用于主要环境。
+核对日期：2026-10-06。主项目 `vfzyimhapttcdxeabvur`；保留的 rehearsal 项目 `forge-cutover-test / dfixexlufeyrdublqcxu`。本文件是已确认方向的执行计划，不是主环境执行记录。操作证据与阻塞项见 [operational status](main-cutover-operational-status.md)。不得将 disposable 的连接、脚本或固定 ref 改一下就直接用于主要环境。
 
 ## 1. 当前已确认与未确认事实
 
 | 项目 | 本轮只读结果 | Cutover 判断 |
 |---|---|---|
-| HEAD | `9e99e4c434c8077fd5a3c82eede88ec4267aed57` | Phase 2 核心已提交 |
+| Worker artifact 源码基准 | `08ac0807e73c134b1c33f13586b1d78c1d09cb59` | Phase 1/2 及 validation checkpoint；最终 repo HEAD 另以 `git rev-parse HEAD` 核对 |
 | Phase 1 | `533f9086d7e588910d39482eeb5e4d7960613c57` — diagnostics/local capture | 本地 checkpoint |
 | Phase 2 | `9e99e4c…` — workspace contract/implementation/blocker fixes/deletion harness | 本地 checkpoint |
-| Working tree | **不干净**：6 个 tracked 文件修改；真实验证 scripts/记录尚未提交；reviewer 文件仍未跟踪 | 执行前整理明确 allowlist 的 validation/docs commit，排除 reviewer、凭据、debug；固定最终 RELEASE_SHA |
-| Branch | 本地 main；缓存 origin/main 为 `839465e…`，本地 ahead 2 | 实时远端查询失败，不把缓存当 GitHub 当前状态 |
+| Working tree | validation/scripts/runbook 已整理为 `08ac080`；operational gate/记录另提交本地 checkpoint | reviewer、凭据和 debug 不提交；最终 commit 后以 `git status --porcelain --untracked-files=no` 验证 tracked clean |
+| Branch | 本地 main；缓存 origin/main 为 `839465e…`，本地含尚未 push 的 checkpoint commits | 实时远端查询失败，不把缓存当 GitHub 当前状态 |
 | CI/CD | 本地无 `.github/workflows` 或明确自动 migration 配置；有 Worker Dockerfile、Render 部署说明 | Render/GitHub App/hooks/其他平台状态未能确认，**按可能自动部署处理** |
 | Task | queued 0、running 0、paused 1 | 不自动 resume/cancel paused task |
 | Paused task | `e0d9c783-7de6-4a02-a219-50a24b7e55c5`；project `93a2f63a-9ec6-4194-b962-4e68dbeea80d`；execution/worker/lease 均为空 | 保留原记录、计划、代码和预算；旧项目另做 manifest 核对 |
@@ -32,12 +32,12 @@
 2. 本地 validation/docs 整理入单独 commit，工作区排除纯本地 reviewer 文件；记录最终 RELEASE_SHA、依赖锁文件和 0006 hash。完整新版 Worker 的准备/安装/离线检查在主库变更前完成。旧版本源码/镜像仅作为备份，不是迁移后的默认启动方案。
 3. 提供主库只读检查/备份与执行途径：优先经过严格 TLS 的直接连接或 session pooler；SQL Editor 可完成只读 catalog 检查，但 API JSON 导出不能代替可恢复的 DDL/ACL/数据备份。实际 ref 必须仍为 `vfzyimhapttcdxeabvur`。
 4. 核对 0001–0005 所需 columns、FK/index、RLS/FORCE RLS、RPC signatures/security/search_path、trigger 与 grants。SQL Editor 手工执行过的迁移未必有 migration history，不能只凭一个版本号断言正确；不得重跑 0001–0005 补齐未知差异。差异先 review，未解释前 STOP。
-5. 明确冻结与 canary 通道，并证明旧页面/直接 API 不能新建任务、批准/修订计划、重试/恢复、请求 preview recovery 或删除项目；可只读访问。**当前没有现成全局 maintenance 开关，关浏览器/停 Worker/UI 灰按钮都不满足这条。**
+5. 明确冻结与 canary 通道，并证明旧页面/直接 API 不能新建任务、批准/修订计划、重试/恢复、请求 preview recovery 或删除项目；可只读访问。**现已提供并在 disposable 验证 ACL gate，具体命令见 operational status；主库尚未冻结。**关浏览器/停 Worker/UI 灰按钮不满足这条。
 6. 已有可用备份及隔离 restore 检查；所有远程副作用已确认收尾。缺任一项，不执行 0006。
 
 ## 3. 冻结方式：操作门闸，不新增 Phase 2 domain model
 
-推荐维护窗口：前端显示 maintenance/read-only，同时由 DB 权限对实际 ingress 生效。实施时先捕获精确 ACL，生成可审阅的 freeze 与 unfreeze SQL；本文件不执行这些 SQL。
+推荐维护窗口：前端显示 maintenance/read-only，同时由 DB 权限对实际 ingress 生效。`ops-ingress-gate.mjs` 先捕获精确 ACL，再事务性冻结并验证或按原 ACL 解除冻结；命令及实际 disposable 证据见 [operational status](main-cutover-operational-status.md)。主库目前没有执行这些 SQL。
 
 - 禁止 authenticated/anon/PUBLIC 对 ita_tasks 的任务 INSERT；同时撤回表级与**列级** INSERT（现有授权是 project_id/user_id/mode/prompt 列级，仅 revoke 表级不够）。
 - 暂时关闭 authenticated 的 approve/revise/retry/resume、preview recovery、request deletion 入口。按 catalog 的实际签名处理，例如 approve(uuid,integer)、revise(uuid,integer,text,jsonb)、retry(uuid,text)、resume(uuid)、request_preview(uuid)、request_delete(uuid,text)。
@@ -45,7 +45,7 @@
 - 不改 task status/lease 来假装任务结束，不改 project deletion_state 或 workspace state 来充当 maintenance flag，不使用 RLS 来阻挡 BYPASSRLS service-role。
 - Freeze grants 必须在 0006 之后仍保持关闭；只恢复批准的 ingress ACL delta，不能重新赋予旧 service-role direct source/authority 写权限。
 
-严格冻结期间的 canary 由受信任管理员通道提交：新 canary project/account，合法 queued task，经现有 business command/approval RPC 入队。审批调用带该 canary 用户的受控数据库用户上下文；不向所有 authenticated 恢复 EXECUTE，不伪造运行状态/lease/revision。该通道验证真实 Worker/模型主流程，**不是冻结期间普通用户 API 的端到端身份测试**。解除冻结后立即复验普通用户入口。
+严格冻结期间的 canary 由受信任管理员通道提交：新 canary project/account，合法 queued task，经现有 business command/approval RPC 入队。审批调用带该 canary 用户的受控数据库用户上下文；不向所有 authenticated 恢复 EXECUTE，不伪造运行状态/lease/revision。disposable 已验证这个通道的 Plan 入队、Worker 领取/保存计划和 Approve/Build 入队；本次 gate 测试没有调用模型或执行真实 Build。后续主环境 canary 才验证真实 Worker/模型主流程，**不是冻结期间普通用户 API 的端到端身份测试**。解除冻结后立即复验普通用户入口。
 
 如果只能用普通 UI 做 canary，必须先落实仅操作者可进入的真实网络/身份门闸；不要为了 canary 临时全局开放 authenticated。这项操作方案和精确 ACL SQL须先 review，再执行。
 
@@ -89,7 +89,7 @@
 | 9 | 再复读所有实例/任务/queues/journals；核对 paused 旧项目的恢复计划；满足稳定观察窗口后按 ACL delta 解冻 | 队列/lease/权限一致；不误恢复旧 source grants；按实际日志判断稳定，不以固定等候时间代替证据 |
 | 10 | 普通用户 API/UI 最小复验；记录 RELEASE_SHA、T0、0006 hash、canary IDs、证据与剩余限制 | 无新 blocker；自动部署是否重新开启另行确认；Phase 3 仍不启动 |
 
-当前 paused task 不纳入自动 canary，继续保持 paused。其真实源码/DB 基线核对通过后，才能另行批准恢复。
+当前 paused task 不纳入自动 canary，处置为保留并禁止自动恢复。已核对 DB 10 个源码文件、已归档沙箱和旧计划，但尚未核对实际沙箱 manifest；旧计划验收缺少 severity，现有 repair/verify 预算也不能直接假定兼容。冻结期间 resume/retry RPC 被关闭。解除冻结前必须落实该旧任务的继续隔离或另行批准的处置，不能仅恢复公共 resume 权限后声称它仍被禁止恢复。
 
 ## 6. 失败分支：默认 forward-fix，禁止旧 Worker 硬回滚
 
@@ -114,9 +114,9 @@ Unexpected workspace state、permission/signature mismatch、unknown drift、par
 
 ## 7. 当前等待确认的事项
 
-- 用户确认本 runbook。
+- Runbook 方向已确认；实际 cutover 仍需最终 GO checklist 全 PASS 后用户明确确认。
 - 外部 CI/CD 与所有 Worker 实例清单/停止和重启控制。
 - 主库 catalog 检查结果或严格 TLS 连接、备份/恢复权限与工具，以及独立恢复目标。
-- 精确冻结/unfreeze ACL、受控 canary 通道与旧 paused 项目的 workspace 保存/恢复计划。
+- 主环境实际冻结/验证、受控 canary 账号确认，以及旧 paused 项目的 workspace 保存和解除冻结后的继续隔离处置。disposable gate 已验证，不代替主环境验证。
 
 Disposable Supabase 保留，不清空、不删除，供后续 Phase 3 transactional/concurrency validation 使用。本轮不执行上述主要环境动作。
