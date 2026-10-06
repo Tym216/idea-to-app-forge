@@ -249,7 +249,7 @@ node preview-recovery.test.mjs
 |---|---|
 | Worker | 全量 **192/192** 通过，语法检查通过；主要为本地单元和替身服务测试 |
 | 数据库基础、计划、暂停、预览恢复 | PGlite 测试通过，不能代替 Supabase 云端全流程验收 |
-| 数据库删除测试 | PGlite **51/51** 通过：补齐测试调用的 p_attempts，实际加载 0001–0006，覆盖 legacy 与新 changeset/checkpoint 的级联删除；真实 Supabase 尚未验证 |
+| 数据库删除测试 | PGlite **51/51** 通过：补齐测试调用的 p_attempts，实际加载 0001–0006，覆盖 legacy 与新 changeset/checkpoint 的级联删除；disposable Supabase 删除级联已验证；主要环境尚未 cutover |
 | 前端 | 已通过本地 lint/build；`/ui-mock` 为模拟展示，不能作为真实生成证据 |
 | 浏览器检查 | 曾对预写的占位页、空网格、正常游戏和待办 fixture 做 Chromium 检查；不是模型生成成功率测试 |
 | 真实链路 | 实际调用过智谱、Supabase、Daytona，已有可交互推箱子和 Langfuse 记录；近期新任务仍出现失败 |
@@ -328,6 +328,6 @@ Verify 将页面打不开、占位页或运行时崩溃等有明确证据的故�
 
 **已有项目切换前先阅读 [切换说明](docs/workspace-cutover.md)**：必须停止旧 Worker、确认远程操作收尾，再执行 0006。未确认的旧 journal 或未知 source drift 不会被自动覆盖。首版 managed source 仅支持有上限的 UTF-8 文本，任意 shell/native lifecycle hooks 暂未开放；checkpoint 不能带 blocker/tool_error 发布。
 
-Phase 2 的 SQL/service/gateway 检查已在本地验证；真实 Supabase、PostgreSQL 并发与 Daytona 联调尚未验证。没有新增 App Version UI 或历史预览。
+Phase 2 已完成独立 disposable Supabase 的正式迁移、真实权限、PostgreSQL 双连接并发及 fresh Daytona/Chromium fixture 验证，结果与边界见 [cutover rehearsal](docs/workspace-cutover-validation.md)。主要环境尚未 cutover，未验证新协议下的真实模型生成全流程。没有新增 App Version UI 或历史预览。
 
-删除测试 harness 已补齐 `p_attempts`，并实际加载 0001–0006：51/51 通过。删除业务逻辑未修改；真实 service-role 权限、PostgreSQL 双连接并发和 Daytona 链路仍需在独立 disposable 环境验证，主要环境尚未 cutover。
+删除测试 harness 已补齐 `p_attempts`，并实际加载 0001–0006：51/51 通过。删除业务逻辑未修改；disposable 的真实权限、双连接和 Daytona fixture rehearsal 已通过，主要环境尚未 cutover。

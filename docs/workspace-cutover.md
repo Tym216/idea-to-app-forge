@@ -32,11 +32,11 @@ Worker 单测含真实 Linux flock/文件 rename、部分写入、迟到 token�
 
 workspace.test.mjs 依序执行 0001–0006，使用 PGlite 验证授权、no-op、partial、证据、不可变快照、完成幂等、级联和 legacy fence；service bridge 使用真实 SQL 与 Linux gateway，模型/构建/预览/浏览器端点使用明确替身。它不证明真实模型生成效果或 PostgreSQL 多连接并发安全。
 
-尚未验证：真实 Supabase 迁移/权限/cache、真实 PostgreSQL 锁竞争/死锁、Daytona 的 flock/SDK stdout 完整性和网络中断联调、新协议下完整真实模型→浏览器→checkpoint 流程。部署前需复验；没有在开发过程中消费你的模型额度或删除真实沙箱。
+已完成 disposable Supabase migration/权限/cache、有限的真实 PostgreSQL 多连接竞争和 fresh Daytona/Chromium fixture 链路，见 [rehearsal 结果](workspace-cutover-validation.md)。未验证长期并发负载、真实网络中断及新协议下完整模型生成流程；主要环境仍需备份并独立执行 cutover。本轮无模型调用，只创建并清理自己生成的两个临时测试沙箱。
 
 App Version UI、用户 Apply、中途意图吸收与历史预览仍属于后续阶段。本轮创建的是 immutable 技术 checkpoint，不宣称已经实现这些产品功能。
 
-删除测试 harness 已修正 p_attempts，并实际加载 0001–0006：PGlite 51/51 通过，覆盖旧 files/snapshot，以及新 changeset/checkpoint、retained writer 和跨项目隔离的删除级联。该结果不是 Supabase service-role 权限或真实 PostgreSQL 并发证明；真实 cutover validation 尚未执行。删除业务逻辑及 0003 均未修改。
+删除测试 harness 已修正 p_attempts，并实际加载 0001–0006：PGlite 51/51 通过，覆盖旧 files/snapshot，以及新 changeset/checkpoint、retained writer 和跨项目隔离的删除级联。该结果不是 Supabase service-role 权限或真实 PostgreSQL 并发证明；disposable 真实 rehearsal 已通过，主要环境未切换。删除业务逻辑及 0003 均未修改。
 
 
 ## Imported legacy pending 的实际出口
@@ -53,3 +53,6 @@ App Version UI、用户 Apply、中途意图吸收与历史预览仍属于后续
 按正式 0001–0006 建 schema。通过真实 service_role PostgREST 直接 INSERT/UPDATE/DELETE files、直接 UPDATE projects 的八个 workspace authority 列、直接 UPDATE/DELETE checkpoint 应被拒绝；authenticated 源码 mutation 亦拒绝，正常 deletion RPC 的 cascade 允许。重复 completion key 的相同稳定 identity 只能生成一份快照/消息，不同 build/verify basis、basis_id、summary 必须冲突。随后验证真实 PostgreSQL 双连接 writer/CAS/completion 并发与锁超时，再跑 fresh Daytona 的依赖 Vite install/build/start/verify/checkpoint。
 
 本地 PGlite 与 Linux gateway 回归已覆盖上述协议反例及 install prepare 成功、commit 前 crash、新 execution reconcile 的路径；不替代真实 Supabase privilege、PostgreSQL 多连接或 Daytona 验证。主要环境 0006 尚未执行。
+
+
+本次真实验证记录与运行入口见 [workspace-cutover-validation.md](workspace-cutover-validation.md)。不要重新在已迁移的 disposable schema 执行 cutover-migrate.mjs；该脚本的空 schema guard 会拒绝重跑。

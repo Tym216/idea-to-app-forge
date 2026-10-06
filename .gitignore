@@ -1,3 +1,5 @@
+app/worker/.cutover
+
 # Local configuration and credentials (keep public examples)
 .env
 .env.*

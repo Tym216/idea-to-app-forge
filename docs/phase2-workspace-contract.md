@@ -157,7 +157,7 @@ Phase 2 创建技术 checkpoint 并确立上述完成事务。Phase 4 的 App vN
 
 测试：write/delete/no-op revision；多文件 partial；超时发生在真实写入前后；旧 token 迟到 staging/rename；resume 与两 Worker takeover；shell lockfile/scaffold/materialization 同步；source 变化使证据 stale；不同 revision 的 verify 不可发布；completion 超时后的幂等查询；legacy journal 导入与不可访问原沙箱；RLS/归属/删除级联。
 
-沙箱 gateway 用本地 Linux 的两个执行做真实锁/迟到操作测试；DB 锁/CAS/完成并发用真实 PostgreSQL 补验证，不能只用 PGlite 单连接结果宣称并发安全。真实 Daytona 是额外联调项，尚未验证。
+沙箱 gateway 的本地 Linux 锁/迟到操作测试之外，已补 disposable PostgreSQL 双连接的 writer/CAS/完成竞争及 fresh Daytona fixture 联调，见 [rehearsal 记录](workspace-cutover-validation.md)。这些有限样例不能证明所有并发顺序或长期负载安全；主要环境尚未切换。
 
 Phase 2 已按此契约实现。切换和验证边界见 [workspace-cutover.md](workspace-cutover.md)。不实现 Conversation intake、用户编辑 UI、历史 worktree/preview、数据库回滚、Profile 分类器或复杂自动 merge。
 
