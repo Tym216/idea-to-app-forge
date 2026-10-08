@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { randomUUID } from 'node:crypto';
 import { sourceManifest, sourceDiff } from '../../worker/src/managed-source.js';
+import {assertForgeTablePrivileges} from './forge-table-privileges.mjs';
 
 const A = '11111111-1111-1111-1111-111111111111';
 const B = '22222222-2222-2222-2222-222222222222';
@@ -78,6 +79,8 @@ for (const f of ['0004_task_pause.sql', '0005_preview_recovery.sql', '0006_works
   await db.exec(readFileSync(new URL(`../migrations/${f}`, import.meta.url), 'utf8'));
   console.log(`已执行 ${f}`);
 }
+
+await assertForgeTablePrivileges(db);
 
 function workspaceCall(task) {
   return async (name, extra = [], types = []) => {

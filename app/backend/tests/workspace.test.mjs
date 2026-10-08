@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
 import { sourceManifest } from '../../worker/src/managed-source.js';
+import {assertForgeTablePrivileges} from './forge-table-privileges.mjs';
 const db = new PGlite();
 process.on('uncaughtException', (e) => { console.error(e.message, e.where || '', e.stack?.split('\n').slice(-2).join('\n')); process.exit(1); });
 await db.exec(`create schema auth; create table auth.users(id uuid primary key,email text);
@@ -33,6 +34,7 @@ await db.exec('set role service_role');
 await db.query("update public.ita_tasks set steps=$1,status='running',worker_id='w',execution_id=$2,lease_until=now()+interval '1 hour' where id=$3",[JSON.stringify(legacyIntents),legacyExec,legacyTask]);
 await db.exec('reset role');
 await db.exec(readFileSync(new URL('../migrations/0006_workspace_contract.sql',import.meta.url),'utf8'));
+await assertForgeTablePrivileges(db);
 async function as(role,uid,sql,args=[]) {
  await db.query('select set_config($1,$2,false)',['request.jwt.claims',uid?JSON.stringify({sub:uid}):'']); await db.exec(`set role ${role}`);
  try {return (await db.query(sql,args)).rows;} finally {await db.exec('reset role');}

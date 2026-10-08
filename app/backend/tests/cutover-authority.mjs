@@ -1,11 +1,31 @@
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {cfg,connect,api,report,errorInfo} from './cutover-real-common.mjs';
+import {assertForgeTablePrivileges,FORGE_TABLE_PRIVILEGE_SQL} from './forge-table-privileges.mjs';
 import {identity,fixture,rpc,okApi,userOptions,deleteFixture,denied} from './cutover-fixture.mjs';
 let db,stage='auth_fixture';const users=[];let f,other;
 try {
   db=await connect();users.push(await identity(),await identity());
   f=await fixture(users[0]);other=await fixture(users[1],'other-owner protocol fixture');
+  stage='table_management_privileges';
+  const invariant=await assertForgeTablePrivileges(db);
+  const forgeTables=[...new Set((await db.query(FORGE_TABLE_PRIVILEGE_SQL)).rows.map(r=>r.table_name))];
+  await db.query('BEGIN');
+  try {
+    await db.query('SET LOCAL ROLE service_role');
+    for(const table of forgeTables) {
+      await db.query('SAVEPOINT truncate_probe');
+      try {
+        await db.query('TRUNCATE TABLE public."'+table.replaceAll('"','""')+'"');
+        await db.query('ROLLBACK TO SAVEPOINT truncate_probe');
+        assert.fail('service_role TRUNCATE was allowed: '+table);
+      } catch(e) {
+        await db.query('ROLLBACK TO SAVEPOINT truncate_probe');
+        assert.equal(e.code,'42501','TRUNCATE must fail by privilege, not FK/trigger side effects: '+table);
+      }
+    }
+  } finally { await db.query('ROLLBACK'); }
+  report('Forge table management invariant','PASS',{...invariant,actual_truncate_denied_tables:forgeTables.length,sqlstate:'42501',denial:'privilege; all probes rolled back'});
   stage='source_privileges';
   for(const [role,options] of [['service_role',{}],['authenticated',userOptions(users[0])],['anon',{key:cfg.anonKey,token:cfg.anonKey}]]) {
     const base='/rest/v1/ita_files';

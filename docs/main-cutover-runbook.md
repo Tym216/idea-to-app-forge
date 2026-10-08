@@ -1,5 +1,8 @@
 # 主要环境 Phase 2 cutover runbook — 方向已确认，当前 NO-GO
 
+> **2026-10-08 artifact update：NO-GO。**当前 0006 已收紧 Forge table-management privileges；新版 hash 为 `5bea628f986f6953f7aac77d05911a5a3a6cfac735c39c169a15ba84b501a782`。旧 `b4fd…` rehearsal PASS 仅作历史记录，不验证新版。Fresh migration/authority/concurrency/Daytona rehearsal 尚未执行，见 [新版验证记录](workspace-privilege-hardening-validation.md)。
+
+
 核对日期：2026-10-06。主项目 `vfzyimhapttcdxeabvur`；保留的 rehearsal 项目 `forge-cutover-test / dfixexlufeyrdublqcxu`。本文件是已确认方向的执行计划，不是主环境执行记录。操作证据与阻塞项见 [operational status](main-cutover-operational-status.md)。不得将 disposable 的连接、脚本或固定 ref 改一下就直接用于主要环境。
 
 ## 1. 当前已确认与未确认事实

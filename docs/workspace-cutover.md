@@ -1,5 +1,8 @@
 # Phase 2 切换与验证
 
+> **2026-10-08 artifact update：NO-GO。**当前 0006 已收紧 Forge table-management privileges；新版 hash 为 `5bea628f986f6953f7aac77d05911a5a3a6cfac735c39c169a15ba84b501a782`。旧 `b4fd…` rehearsal PASS 仅作历史记录，不验证新版。Fresh migration/authority/concurrency/Daytona rehearsal 尚未执行，见 [新版验证记录](workspace-privilege-hardening-validation.md)。
+
+
 这是源码状态协议的切换，需要 0006 与新版 Worker 一起更新。前端本轮没有改动。真实 .env 不需修改，没有增加 npm 依赖。
 
 ## 切换顺序

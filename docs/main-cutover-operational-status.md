@@ -1,5 +1,8 @@
 # Main cutover operational status — NO-GO
 
+> **2026-10-08 artifact update：NO-GO。**当前 0006 已收紧 Forge table-management privileges；新版 hash 为 `5bea628f986f6953f7aac77d05911a5a3a6cfac735c39c169a15ba84b501a782`。旧 `b4fd…` rehearsal PASS 仅作历史记录，不验证新版。Fresh migration/authority/concurrency/Daytona rehearsal 尚未执行，见 [新版验证记录](workspace-privilege-hardening-validation.md)。
+
+
 核对日期：2026-10-06。主项目 `vfzyimhapttcdxeabvur`；disposable 为 `forge-cutover-test / dfixexlufeyrdublqcxu`。本记录区分已执行验证和待执行步骤。**未执行主环境 0006、冻结、部署、push 或 Phase 3。**
 
 ## 已完成的本地 checkpoint 与 artifact

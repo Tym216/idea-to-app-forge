@@ -461,5 +461,16 @@ do $$ declare f record; begin
    execute format('grant execute on function %s to service_role',f.sig);
  end loop;
 end $$;
+-- Supabase default ACLs may have granted table-management privileges at CREATE TABLE time.
+-- Row/RPC fencing cannot stop TRUNCATE, and Worker does not need TRIGGER/REFERENCES.
+-- Scope is the literal Forge prefix, not ALL TABLES IN SCHEMA public (LIKE 'ita_%' is too broad).
+-- New Forge tables must repeat this hardening in their own migration; defaults are intentionally unchanged.
+do $$ declare t record; begin
+ for t in select n.nspname,c.relname from pg_class c join pg_namespace n on n.oid=c.relnamespace
+   where n.nspname='public' and c.relkind in ('r','p') and c.relname ~ '^ita_'
+ loop
+   execute format('revoke truncate,trigger,references on table %I.%I from public,anon,authenticated,service_role',t.nspname,t.relname);
+ end loop;
+end $$;
 notify pgrst,'reload schema';
 commit;

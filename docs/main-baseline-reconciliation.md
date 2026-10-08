@@ -1,5 +1,8 @@
 # Main baseline reconciliation — 2026-10-08
 
+> 后续状态：0006 已本地修正，旧 hash / 未修改描述是本次历史 reconciliation 的记录。新版仅离线 PASS，fresh real rehearsal 仍 pending，见 [新版验证记录](workspace-privilege-hardening-validation.md)。
+
+
 **Main baseline: FAIL / NO-GO。**函数、RLS 与约束表示差异已消除；真实 table privileges 留下 protocol bypass，旧 0006 未处理。仅 Main SELECT / read-only transaction、本地 PGlite 和代码检查；没有 Main migration/freeze/backup、restore 连接、push/deploy 或 Phase 3。
 
 ## Functions
