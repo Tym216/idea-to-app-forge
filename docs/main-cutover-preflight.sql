@@ -1,4 +1,7 @@
 -- Read-only catalog inspection for user review / SQL Editor. No freeze, migration or DML.
+-- Raw function definition_hash is diagnostic only (CRLF/rendering can differ).
+-- Use tests/main-baseline-reconcile.mjs for structural/body/ACL canonical comparison.
+-- NOT NULL must be compared through attnotnull across PG catalog versions; policy roles through parsed arrays.
 -- Run only on confirmed main ref vfzyimhapttcdxeabvur after approval to inspect metadata.
 begin transaction read only;
 
@@ -24,7 +27,7 @@ select c.relname,a.attname,a.atttypid::regtype data_type,a.attnotnull,a.attacl
 from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace
 where n.nspname='public' and c.relname like 'ita_%' and a.attnum>0 and not a.attisdropped order by c.relname,a.attnum;
 
-select c.relname,k.conname,pg_get_constraintdef(k.oid) definition
+select c.relname,k.conname,k.contype,k.convalidated,k.condeferrable,k.condeferred,pg_get_constraintdef(k.oid) definition
 from pg_constraint k join pg_class c on c.oid=k.conrelid join pg_namespace n on n.oid=c.relnamespace
 where n.nspname='public' and c.relname like 'ita_%' order by c.relname,k.conname;
 
