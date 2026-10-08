@@ -1,5 +1,8 @@
 # Main baseline reconciliation — 2026-10-08
 
+> 最新状态：revised 0006 的 **fresh v2 rehearsal 与 Main 只读 baseline compatibility 均 PASS**；以下旧记录保留历史上下文。整体仍 NO-GO，见 [新版真实验证记录](workspace-cutover-validation-v2.md)。
+
+
 > 后续状态：0006 已本地修正，旧 hash / 未修改描述是本次历史 reconciliation 的记录。新版仅离线 PASS，fresh real rehearsal 仍 pending，见 [新版验证记录](workspace-privilege-hardening-validation.md)。
 
 

@@ -1,5 +1,8 @@
 # Revised 0006 privilege hardening — pending fresh rehearsal
 
+> Fresh v2 rehearsal 已完成并绑定本页 revised hash；Main read-only compatibility PASS。下列准备阶段描述是历史状态，实际结果见 [v2 record](workspace-cutover-validation-v2.md)。整体仍 NO-GO。
+
+
 日期：2026-10-08。**NO-GO。**Main、restore-test、旧 disposable 均未操作；未 freeze/backup/deploy/push，Phase 3 未开始。
 
 ## Artifact identity

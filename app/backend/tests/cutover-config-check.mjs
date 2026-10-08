@@ -7,6 +7,7 @@ const output = (check, status, details = {}) => console.log(JSON.stringify({ che
 let cfg;
 try { cfg = loadCutoverConfig(); }
 catch (error) { output('configuration', 'FAIL', { variable: error.variable || '.env.cutover', error_type: safeErrorCode(error) }); process.exit(1); }
+if (cfg.projectRef !== 'vtevambqlnezprpezqyf') { output('approved_fresh_target','FAIL',{error_type:'UNAPPROVED_DISPOSABLE_PROJECT'}); process.exit(1); }
 output('env_load_and_project_identity', 'OK', { source: 'app/worker/.env.cutover', project_ref: cfg.projectRef, primary_ref: cfg.primaryRef, distinct_from_primary: true });
 
 // OpenAPI root is an administrative probe, never a public-key validity probe.
@@ -42,7 +43,7 @@ try {
   });
   await clients[0].connect(); clients[0].cutoverConnected = true;
   if (clients[0].connection.stream.authorized !== true || clients[0].connection.stream.encrypted !== true) throw Object.assign(new Error(), {code:'TLS_NOT_VERIFIED'});
-  output('database_tls', 'OK', {project_ref:cfg.databaseRef, certificate_verified:true, reject_unauthorized:true});
+  output('database_tls', 'OK', {project_ref:cfg.databaseRef, certificate_verified:true, reject_unauthorized:true, ca_path:'app/worker/.cutover/prod-ca-2021.crt'});
   await clients[0].query('BEGIN READ ONLY');
   const single = await clients[0].query("select pg_backend_pid() pid, current_setting('transaction_read_only') read_only");
   if (single.rows[0]?.read_only !== 'on') throw Object.assign(new Error(), {code:'READ_ONLY_NOT_CONFIRMED'});
@@ -56,7 +57,9 @@ try {
   output('CUTOVER_DATABASE_URL', 'OK', { project_ref: cfg.databaseRef, independent_connections: 2, backend_pids:pids, distinct_backend_pids: true, read_only_transactions: true });
   // Read-only inventory helps prevent migrating over a non-empty application schema later.
   const inventory = await clients[0].query("select count(*)::int tables from information_schema.tables where table_schema='public' and table_type='BASE TABLE'");
-  output('disposable_schema_inventory', 'OK', { public_tables: inventory.rows[0].tables });
+  const stale=await clients[0].query("select (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname ~ '^ita_')::int functions,(select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname ~ '^ita_')::int relations");
+  if(inventory.rows[0].tables!==0||stale.rows[0].functions!==0||stale.rows[0].relations!==0)throw Object.assign(new Error(),{code:'FRESH_SCHEMA_REQUIRED'});
+  output('disposable_schema_inventory', 'OK', { public_tables: inventory.rows[0].tables,...stale.rows[0],fresh:true });
 } catch (error) {
   failed = true;
   output('CUTOVER_DATABASE_URL', 'FAIL', { project_ref: cfg.databaseRef, error_type: safeErrorCode(error) });

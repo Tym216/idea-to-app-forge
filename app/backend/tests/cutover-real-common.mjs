@@ -3,7 +3,8 @@ import { X509Certificate } from 'node:crypto';
 import { Client } from 'pg';
 import { loadCutoverConfig, safeErrorCode } from './cutover-config.mjs';
 export const cfg = loadCutoverConfig();
-if (cfg.projectRef !== 'dfixexlufeyrdublqcxu') throw Object.assign(new Error(), {code:'UNAPPROVED_DISPOSABLE_PROJECT'});
+// User-approved fresh forge-cutover-v2-test; old disposable/Main/restore are forbidden targets.
+if (cfg.projectRef !== 'vtevambqlnezprpezqyf') throw Object.assign(new Error(), {code:'UNAPPROVED_DISPOSABLE_PROJECT'});
 const ca = readFileSync(new URL('../../worker/.cutover/prod-ca-2021.crt',import.meta.url),'utf8');
 const certificate = new X509Certificate(ca);
 if (!certificate.ca || Date.parse(certificate.validTo)<=Date.now()) throw Object.assign(new Error(),{code:'CA_INVALID_OR_EXPIRED'});

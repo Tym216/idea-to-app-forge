@@ -5,10 +5,13 @@ import path from 'node:path';
 import {PGlite} from '@electric-sql/pglite';
 import {connectOperational} from './ops-ingress-gate.mjs';
 import {FUNCTION_SQL,compareFunction,functionFingerprint,canonicalPolicy,canonicalConstraints,equal,unifiedBodyDiff,hash} from './baseline-comparator.mjs';
+import {loadRehearsalProof,assertCompatiblePreMigrationGrants} from './rehearsal-proof.mjs';
+import {assertForgeTablePrivileges} from './forge-table-privileges.mjs';
 const root=fileURLToPath(new URL('../../../',import.meta.url));
 const dir=path.join(root,'app/worker/.cutover/main-baseline-reconciliation-2026-10-08');
 const report=o=>console.log(JSON.stringify(o));let db,local;
 try {
+ const proof=process.argv.includes('--validated-rehearsal')?loadRehearsalProof(root):null;
  ({db}=await connectOperational('main',{ackMain:true}));await db.query('BEGIN TRANSACTION READ ONLY');
  local=new PGlite();
  await local.exec(`create schema auth;create table auth.users(id uuid primary key,email text);
@@ -24,12 +27,12 @@ try {
  r.rolname owner,pg_has_role('service_role',c.relowner,'USAGE') effective_owner_role
  from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_roles r on r.oid=c.relowner
  cross join (select unnest(array['TRUNCATE','TRIGGER','REFERENCES']) privilege) p
- where n.nspname='public' and c.relkind='r' and c.relname like 'ita_%' order by c.relname,p.privilege`;
+ where n.nspname='public' and c.relkind='r' and c.relname ~ '^ita_' order by c.relname,p.privilege`;
  const effective=(await db.query(effectiveSQL)).rows,expectedEffective=(await local.query(effectiveSQL)).rows;
  const grants=(await db.query(`select c.relname,g.privilege_type,case when g.grantee=0 then 'PUBLIC' else gr.rolname end grantee,gt.rolname grantor,g.is_grantable
  from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) g
  left join pg_roles gr on gr.oid=g.grantee left join pg_roles gt on gt.oid=g.grantor
- where n.nspname='public' and c.relname like 'ita_%' and g.privilege_type in ('TRUNCATE','TRIGGER','REFERENCES') order by c.relname,grantee,g.privilege_type`)).rows;
+ where n.nspname='public' and c.relname ~ '^ita_' and g.privilege_type in ('TRUNCATE','TRIGGER','REFERENCES') order by c.relname,grantee,g.privilege_type`)).rows;
  const defaults=(await db.query(`select r.rolname creator,coalesce(n.nspname,'GLOBAL') schema_name,d.defaclobjtype object_type,
  case when g.grantee=0 then 'PUBLIC' else gr.rolname end grantee,gt.rolname grantor,g.privilege_type,g.is_grantable
  from pg_default_acl d join pg_roles r on r.oid=d.defaclrole left join pg_namespace n on n.oid=d.defaclnamespace
@@ -39,9 +42,9 @@ try {
  select oid,rolname,rolinherit,0 depth from pg_roles where rolname='service_role'
  union all select p.oid,p.rolname,p.rolinherit,a.depth+1 from ancestors a join pg_auth_members m on m.member=a.oid join pg_roles p on p.oid=m.roleid where a.depth<8)
  select distinct rolname,rolinherit,depth,pg_has_role('service_role',oid,'USAGE') effective_usage from ancestors order by depth,rolname`)).rows;
- const columnsSQL=`select c.relname,a.attname,a.attnotnull from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_attribute a on a.attrelid=c.oid where n.nspname='public' and c.relkind='r' and c.relname like 'ita_%' and a.attnum>0 and not a.attisdropped order by c.relname,a.attname`;
- const constraintsSQL=`select c.relname,k.conname,k.contype,k.convalidated,k.condeferrable,k.condeferred,pg_get_constraintdef(k.oid) definition from pg_constraint k join pg_class c on c.oid=k.conrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname like 'ita_%' order by c.relname,k.conname`;
- const policySQL=`select tablename,policyname,roles,cmd,qual,with_check from pg_policies where schemaname='public' and tablename like 'ita_%' order by tablename,policyname`;
+ const columnsSQL=`select c.relname,a.attname,a.attnotnull from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_attribute a on a.attrelid=c.oid where n.nspname='public' and c.relkind='r' and c.relname ~ '^ita_' and a.attnum>0 and not a.attisdropped order by c.relname,a.attname`;
+ const constraintsSQL=`select c.relname,k.conname,k.contype,k.convalidated,k.condeferrable,k.condeferred,pg_get_constraintdef(k.oid) definition from pg_constraint k join pg_class c on c.oid=k.conrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname ~ '^ita_' order by c.relname,k.conname`;
+ const policySQL=`select tablename,policyname,roles,cmd,qual,with_check from pg_policies where schemaname='public' and tablename ~ '^ita_' order by tablename,policyname`;
  const columns=(await db.query(columnsSQL)).rows,wantColumns=(await local.query(columnsSQL)).rows;
  const constraints=(await db.query(constraintsSQL)).rows,wantConstraints=(await local.query(constraintsSQL)).rows;
  const policies=(await db.query(policySQL)).rows,wantPolicies=(await local.query(policySQL)).rows;
@@ -58,8 +61,28 @@ try {
  report({step:'service-role effective privileges',tables:[...new Set(effective.map(r=>r.relname))].map(name=>({table:name,privileges:effective.filter(r=>r.relname===name),direct_grants:grants.filter(r=>r.relname===name&&r.grantee==='service_role')})),current_defaults:defaults.filter(r=>r.grantee==='service_role'),membership,origin_limit:'catalog proves current direct grants/default ACL, not historical grant provenance'});
  const authority=new Set(['ita_projects','ita_files','ita_snapshots','ita_changesets','ita_tasks','ita_plans','ita_plan_feedback']);
  const unsafe=effective.filter(p=>authority.has(p.relname)&&p.effective);
- const failed=functions.some(f=>f.classification!=='cosmetic/rendering only')||Object.values(canonical).some(v=>!v)||unsafe.length>0;
- report({step:'main baseline reconciliation',status:failed?'FAIL':'PASS',unsafe_authority_privileges:unsafe.map(p=>({table:p.relname,privilege:p.privilege})),record:'app/worker/.cutover/main-baseline-reconciliation-2026-10-08/evidence.json',main_modified:false,reason:unsafe.length?'unneeded authority privileges remain; no platform allowlist':'structured comparison'});
+ let compatibility=null;
+ if(proof) {
+   const expectedTables=[...new Set(expectedEffective.map(r=>r.relname))];
+   // Reproduce only the observed API-role table-management ACL, in LOCAL PGlite.
+   // Main remains read-only; owner/membership/grant-option differences still fail closed below.
+   const qi=v=>'"'+String(v).replaceAll('"','""')+'"';
+   for(const table of expectedTables)await local.exec('revoke truncate,trigger,references on public.'+qi(table)+' from public,anon,authenticated,service_role');
+   for(const g of grants.filter(g=>['PUBLIC','anon','authenticated','service_role'].includes(g.grantee))) {
+     if(!expectedTables.includes(g.relname)||!['TRUNCATE','TRIGGER','REFERENCES'].includes(g.privilege_type))throw new Error('UNMODELED_GRANT');
+     await local.exec('grant '+g.privilege_type+' on public.'+qi(g.relname)+' to '+(g.grantee==='PUBLIC'?'PUBLIC':qi(g.grantee)));
+   }
+   if(!equal((await local.query(effectiveSQL)).rows.map(r=>({table:r.relname,privilege:r.privilege,effective:r.effective})),effective.map(r=>({table:r.relname,privilege:r.privilege,effective:r.effective}))))throw new Error('PRE_MIGRATION_PRIVILEGE_SIMULATION_MISMATCH');
+   await local.exec('alter default privileges in schema public grant all on tables to service_role,anon,authenticated');
+   await local.exec(readFileSync(path.join(root,'app/backend/migrations/0006_workspace_contract.sql'),'utf8'));
+   const postMigrationInvariant=await assertForgeTablePrivileges(local);
+   compatibility={...proof,...assertCompatiblePreMigrationGrants({effective,grants,membership,expectedTables,postMigrationInvariant})};
+ }
+ const unresolved=compatibility?[]:unsafe;
+
+ const failed=functions.some(f=>f.classification!=='cosmetic/rendering only')||Object.values(canonical).some(v=>!v)||unresolved.length>0;
+ report({step:'main baseline reconciliation',status:failed?'FAIL':'PASS',semantic_drift:functions.filter(f=>f.classification==='semantic difference').length,unsafe_authority_privileges:unresolved.map(p=>({table:p.relname,privilege:p.privilege})),observed_pre_migration_authority_grants:unsafe.map(p=>({table:p.relname,privilege:p.privilege})),migration_compatibility:compatibility,record:'app/worker/.cutover/main-baseline-reconciliation-2026-10-08/evidence.json',main_modified:false,reason:unresolved.length?'unneeded authority privileges remain; no platform allowlist':compatibility?'known pre-migration grants safely handled by exact revised artifact; full fresh rehearsal + local ACL replay verified':'structured comparison'});
+ writeFileSync(path.join(dir,'compatibility-result.json'),JSON.stringify({status:failed?'FAIL':'PASS',main_modified:false,semantic_drift:functions.filter(f=>f.classification==='semantic difference').length,unresolved_unsafe_authority_privileges:unresolved,observed_pre_migration_authority_grants:unsafe,compatibility},null,2),{mode:0o600});
  if(failed)process.exitCode=1;
 }catch(e){report({status:'FAIL',error_type:typeof e.code==='string'?e.code:'RECONCILIATION_ERROR'});process.exitCode=1;}
 finally{if(db){await db.query('ROLLBACK').catch(()=>{});await db.end();}if(local)await local.close();}

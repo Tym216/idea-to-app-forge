@@ -1,5 +1,8 @@
 # 主要环境 Phase 2 cutover runbook — 方向已确认，当前 NO-GO
 
+> 最新状态：revised 0006 的 **fresh v2 rehearsal 与 Main 只读 baseline compatibility 均 PASS**；以下旧记录保留历史上下文。整体仍 NO-GO，见 [新版真实验证记录](workspace-cutover-validation-v2.md)。
+
+
 > **2026-10-08 artifact update：NO-GO。**当前 0006 已收紧 Forge table-management privileges；新版 hash 为 `5bea628f986f6953f7aac77d05911a5a3a6cfac735c39c169a15ba84b501a782`。旧 `b4fd…` rehearsal PASS 仅作历史记录，不验证新版。Fresh migration/authority/concurrency/Daytona rehearsal 尚未执行，见 [新版验证记录](workspace-privilege-hardening-validation.md)。
 
 
