@@ -1,6 +1,6 @@
 # Main Stage B operational proof — STOP / NO-GO
 
-> 最新状态：narrow gate repair 已 PASS；Main 只读访问恢复、mutation 仍冻结。Stage B 在远程 quiescence 查询不可用处再次 STOP。下面原 freeze 回归结果保留历史，当前清单以末尾更新为准。
+> 最新状态：narrow gate repair 和经批准的 lifecycle quiescence proof 已 PASS。Paused source 完整保存后发现 DB 外 package-lock.json，已重新 archive 并 STOP；Main 仍冻结，未 backup/restore。之前的 session-400 阻塞保留历史，当前清单以末尾更新为准。
 
 
 日期：2026-10-08。候选代码 `e8eaaa6e74c53176e9edc905639d274b832d86c5`。本轮授权范围仅 freeze → quiescence → paused source preservation → T0 backup → restore validation；0006/deploy/unfreeze/Phase 3 未批准。
@@ -88,3 +88,62 @@ GRANT EXECUTE ON FUNCTION "public"."ita_owns_project"(p_project_id uuid) TO "aut
 | controlled admin canary path ready | PASS（权限）；未创建真实 canary task |
 
 **总体 NO-GO。Main 保持 frozen，但普通用户读取已恢复。未 backup/restore、0006、deploy/push、unfreeze 或 Phase 3。**
+
+## Approved lifecycle alternative → paused preservation（2026-10-08）
+
+本轮用户明确批准使用 lifecycle-based alternative proof，并仅临时启动 paused sandbox 读取源码。没有为了取得 sessions=[] 启动其他 8 个 sandbox。
+
+### 最终采用的 operational quiescence 判据
+
+原 listSessions 方法属于 runtime/process API，inactive container 无 runtime 可供查询；先前 stopped 的 SANDBOX_NOT_RUNNING / archived 的 BAD_REQUEST HTTP 400 均保留记录，现分类为 **not applicable to inactive runtime**，不再解释为可能存在 active session。官方 [lifecycle](https://www.daytona.io/docs/en/sandboxes/) 与 [persistence](https://www.daytona.io/docs/en/persistence/) 说明 stop 清除 process memory，archive 保存 filesystem 到 object storage。此次所有对象实际都是 container，没有把 VM paused/hot memory resume 混入此判据。
+
+producer side：Main frozen；WSL 旧 Worker process=0；queued/running tasks=0；future lease=0；最近一小时 heartbeat=0；active preview/deletion=0；unresolved journal=0；uncertain command marker=0；paused task execution/worker/lease/heartbeat 都为空。
+
+execution side：2026-10-08T13:48:23.660Z 和 13:48:49.899Z 两次只读 control-plane observations 间隔约 26 秒。9 个 sandbox 均保持 5 stopped / 4 archived；state、desired state、updatedAt、lastActivityAt、backup state 与 error 标记全部相同。没有 started/starting/stopping/restoring/archiving/snapshotting/deleting/error 状态，没有观测到新 activity。
+
+Worker producer 核对：daytona.js writeFile await SDK fs.uploadFile；SDK uploadFiles 为 await 的直接 FormData HTTP 上传，没有 presigned source queue、独立上传 worker 或外部 source-write job。workspace private helper/spec 上传和 gateway execution 也由 Worker await。runAsync 只用于 sandbox 内 dev-server runtime；stop 生命周期清除该进程状态。当前 Worker 只在 WSL 手动运行的事实由用户确认。因此在冻结入口、无本地 producer/DB active execution、全部 executor inactive 下，确认没有已知 Forge-controlled producer/executor 能继续迟到写入 managed source/Main DB。**此结论不承诺平台内部绝对不存在任何不可观测事件。**
+
+Evidence：ignored `lifecycle-observation-1.json`、`lifecycle-observation-2.json`、`lifecycle-quiescence-proof.json`。旧 `quiescence-inspection.json` 中 400 没有被覆盖。
+
+### Paused sandbox 的受控 preservation
+
+只操作 `9394813e-2d8d-4ccf-8642-5c9e95e0f570`；起始 archived/container，auto-delete=-1，auto-stop=120。Main 仍 frozen，paused task 不 resume，不授予 writer。
+
+临时 start 后 sessions=[]。先执行进程检查，再在源码读取前重新检查：只有 Daytona daemon、code interpreter REPL、computer-use/DBus 基础设施、空闲 shell/tail/sleep 及本次 ps。按精确 command/path 分类，不按所有 python/node 进程自动放行；没有 App/npm/Vite/旧任务进程或非预期 session。平台服务分类参考 [Daytona architecture](https://www.daytona.io/docs/en/architecture/) 及 [sandbox code interpreter](https://www.daytona.io/docs/en/python-sdk/sync/sandbox/)，并保存实际进程列表。没有恢复旧 process memory。
+
+完整 scan 重用 Forge canonical managed-source manifest 定义：规范化路径、完整递归、排除 runtime/依赖/`.forge-*`、拒绝 symlink/截断、验证文本/内容 hash；binary resource 单独保存并视为待处置差异。Scanner 以内存中 data-URL Node module 执行，没有上传脚本或写 managed source。结果在本地重新计算 hash 后保存完整内容。
+
+**真实差异：DB 的 10 个文件全部匹配；sandbox 多一个 package-lock.json（59,167 bytes）。没有其他文件差异或 binary resource。**
+
+| Manifest | Files | Code hash |
+|---|---:|---|
+| DB ita_files | 10 | `2596fb9972332c1fc0db96b6b211e58bbec51541b160950657b19d1c9be49b8a` |
+| Physical managed source | 11 | `e620dd2295e21d9942f56edfd7e51bfbac7d1cfffbe1919549337887bb8fbddb` |
+
+Extra lockfile hash：`b408286f50406056e24f00c7488f1510bdf5f82700cb486045560e5935c47307`。package-lock.json 在当前 contract 中属于 managed source，所以不能自动忽略。
+
+保存于 ignored `app/worker/.cutover/stage-b-2026-10-08/paused-source/physical-manifest.json`（全部 11 份完整内容）和 `db-manifest.json`（DB 10 份内容），以及 `paused-preservation-result.json`。这些是明确的旧 workspace source preservation evidence，**不是 T0 database backup，也不是把 debug logs 充当 DB backup**。
+
+2026-10-08T13:56:27.455Z scan 保存后，执行 stop → archive，最终 control-plane state=archived，cleanup PASS。没有修改 managed source、覆盖 DB、吸收差异成 revision、修改 paused task/journal 或授予 writer。其他 8 个 sandbox 未唤醒。
+
+按照“physical 与 DB 有差异就保存并 STOP”等待用户决定的规则，**没有创建 T0 backup，没有连接 restore-test 做恢复，也没有执行 Main 0006**。
+
+### 当前最终 GO / NO-GO
+
+| 项目 | 当前结果 |
+|---|---|
+| ingress actually frozen / read-only isolation | PASS：维持窄修复后的 frozen invariant |
+| all old Workers stopped | PASS：两次 producer-side observations 都为 0 |
+| remote side effects quiesced | PASS：限定已知 Forge producer/executor 的 approved lifecycle proof |
+| paused physical source preserved | PASS：完整内容/hash 保存，cleanup 回到 archived |
+| paused physical source == DB | DISCREPANCY：额外 package-lock.json，等待用户处置 |
+| T0 backup created | NOT RUN |
+| backup manifest/hash verified | NOT RUN |
+| restore completed | NOT RUN |
+| restored schema/data/hash/relationships validated | NOT RUN |
+| rollback point genuinely usable | UNKNOWN：还没有实际恢复验证的 T0 |
+| revised 0006 artifact unchanged | PASS：仍为 `5bea628f986f6953f7aac77d05911a5a3a6cfac735c39c169a15ba84b501a782` |
+| matching Worker artifact ready | PASS：Worker src/package/lock 未修改，既有固定 artifact 测试证据有效 |
+| controlled canary path ready | PASS（权限/程序）：未创建真实 canary task |
+
+**总体 NO-GO。** 需用户决定如何处置 preserved physical lockfile 与 DB source 的差异后，才可继续原 Stage B。Main 保持 frozen；不自动执行 backup/restore、0006、deploy、push、unfreeze 或 Phase 3。
