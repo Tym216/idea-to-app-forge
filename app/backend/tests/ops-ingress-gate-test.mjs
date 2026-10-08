@@ -11,6 +11,7 @@ import {connectOperational,captureIngress,gateSQL,freezeIngress,verifyFrozen,unf
 let db,snapshot,restored=false;const userIds=[];
 try {
  ({db}=await connectOperational('disposable'));const u=await identity();userIds.push(u.id);const baseline=await fixture(u,'ingress gate fixture');
+ const outsider=await identity();userIds.push(outsider.id);
  snapshot=await captureIngress(db,cfg.projectRef);assert.ok(snapshot.grants.some(g=>g.col&&g.name==='ita_tasks'));
  const dir=new URL('../../worker/.cutover/ingress-test-'+randomUUID()+'/',import.meta.url);mkdirSync(dir,{recursive:true,mode:0o700});
  writeFileSync(new URL('snapshot.json',dir),JSON.stringify(snapshot),{mode:0o600});writeFileSync(new URL('freeze.sql',dir),gateSQL(snapshot),{mode:0o600});writeFileSync(new URL('unfreeze.sql',dir),gateSQL(snapshot,true),{mode:0o600});
@@ -18,7 +19,16 @@ try {
  await denied('/rest/v1/ita_tasks',{method:'POST',body:{project_id:baseline.projectId,user_id:u.id,mode:'build',prompt:'must not enqueue'},...userOptions(u)},'frozen user task INSERT');
  for(const [name,body] of [['ita_resume_task',{p_task_id:baseline.task.id}],['ita_retry_task',{p_task_id:baseline.task.id,p_kind:'new'}],['ita_approve_plan',{p_plan_id:baseline.plan.id,p_version:baseline.plan.version}],['ita_request_preview_recovery',{p_project_id:baseline.projectId}],['ita_request_project_delete',{p_project_id:baseline.projectId}]])
   await denied('/rest/v1/rpc/'+name,{method:'POST',body,...userOptions(u)},'frozen '+name);
- assert.equal((await okApi('/rest/v1/ita_projects?id=eq.'+baseline.projectId,userOptions(u))).length,1);
+ for(const table of ['ita_projects','ita_tasks','ita_plans','ita_files','ita_messages']){
+  const filter=(table==='ita_projects'?'id':'project_id')+'=eq.'+baseline.projectId;
+  const rows=await okApi('/rest/v1/'+table+'?'+filter,userOptions(u));
+  if(['ita_projects','ita_tasks','ita_plans'].includes(table))assert.ok(rows.length>0);
+  assert.equal((await okApi('/rest/v1/'+table+'?'+filter,userOptions(outsider))).length,0);
+ }
+ await denied('/rest/v1/ita_files?project_id=eq.'+baseline.projectId,{method:'PATCH',body:{content:'forbidden'},...userOptions(u)},'frozen direct source write');
+ await denied('/rest/v1/ita_projects?id=eq.'+baseline.projectId,{method:'PATCH',body:{name:'forbidden'},...userOptions(u)},'frozen project update');
+ await denied('/rest/v1/ita_messages',{method:'POST',body:{project_id:baseline.projectId,user_id:u.id,role:'user',content:'forbidden'},...userOptions(u)},'frozen message write');
+ await denied('/rest/v1/rpc/ita_worker_update_task',{method:'POST',body:{p_task_id:baseline.task.id,p_worker_id:'forbidden',p_execution_id:randomUUID(),p_patch:{}},...userOptions(u)},'frozen agent-writing RPC');
  const canaryId=randomUUID();
  // Only this trusted DB administrator can enter the canary path. Normal user roles stay closed.
  const requestFile=new URL('canary-request.txt',dir);writeFileSync(requestFile,'创建一个中文待办应用，支持添加、完成和删除。',{mode:0o600});
@@ -32,13 +42,13 @@ try {
  assert.equal(JSON.parse(approval.stdout).task_status,'queued');await verifyFrozen(db);
  task=(await rpc('ita_claim_task',{p_worker_id:worker,p_lease_seconds:3600}))[0];assert.equal(task.mode,'build');assert.equal(task.project_id,canaryId);
  assert.equal(await rpc('ita_worker_update_task',{p_task_id:task.id,p_worker_id:worker,p_execution_id:task.execution_id,p_patch:{status:'failed',error:'Gate canary fixture cleanup; no build was executed'}}),true);
- report('ingress frozen / canary-only','PASS',{column_grants_revoked:true,client_mutation_denied:true,read_only_client_preserved:true,trusted_plan_approve_build_enqueued:true,global_client_execute_still_closed:true});
+ report('ingress frozen / canary-only','PASS',{column_grants_revoked:true,client_mutation_denied:true,read_only_client_preserved:true,trusted_plan_approve_build_enqueued:true,client_mutation_execute_still_closed:true,explicit_rls_helper_preserved:true});
  await unfreezeIngress(db,snapshot);restored=true;
  assert.deepEqual((await captureIngress(db,cfg.projectRef)).grants,snapshot.grants);
  const normal=await api('/rest/v1/ita_tasks',{method:'POST',body:{project_id:canaryId,user_id:u.id,mode:'build',prompt:'restored client ingress'},...userOptions(u)});assert.equal(normal.status,201);
  const queued=await okApi('/rest/v1/ita_tasks?project_id=eq.'+canaryId+'&status=eq.queued',userOptions(u));assert.equal(queued.length,1);
  await rpc('ita_cancel_task',{p_task_id:queued[0].id},userOptions(u));
- await deleteFixture(baseline);await deleteFixture({projectId:canaryId,user:u});assert.ok((await api('/auth/v1/admin/users/'+u.id,{method:'DELETE'})).status<400);
+ await deleteFixture(baseline);await deleteFixture({projectId:canaryId,user:u});for(const uid of userIds)assert.ok((await api('/auth/v1/admin/users/'+uid,{method:'DELETE'})).status<400);
  report('ingress exact unfreeze','PASS',{acl_restored_exactly:true,normal_authenticated_task_insert:true,fixtures_cleaned:true});
 }catch(e){report('ingress gate validation','FAIL',errorInfo(e));process.exitCode=1;}
 finally{if(db&&snapshot&&!restored)await unfreezeIngress(db,snapshot).catch(()=>{});if(db)await db.end();}
