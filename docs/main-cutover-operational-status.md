@@ -1,5 +1,8 @@
 # Main cutover operational status — NO-GO
 
+> 当前 Stage A（2026-10-08）以 [Main readiness / 待执行命令](main-cutover-stage-a.md) 为准；以下条目保留为历史记录，不能用于判断当前连接、工具或权限状态。
+
+
 > 最新状态：revised 0006 的 **fresh v2 rehearsal 与 Main 只读 baseline compatibility 均 PASS**；以下旧记录保留历史上下文。整体仍 NO-GO，见 [新版真实验证记录](workspace-cutover-validation-v2.md)。
 
 
