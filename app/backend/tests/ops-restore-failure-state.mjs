@@ -1,0 +1,19 @@
+import {operationalConnect,operationalRoot} from './ops-db-target.mjs';import {verifyFrozen} from './ops-ingress-gate.mjs';import {validateRecovery,recoveryIdentity} from './ops-recovery-bundle.mjs';import {recoveryCatalog,compareRecoveryCatalog} from './ops-recovery-catalog.mjs';
+import {readFileSync,writeFileSync} from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';
+const directory=path.join(operationalRoot,'app/worker/.cutover/backups/main-T0-20261008-01'),clients=[];
+try{
+ const restore=await operationalConnect('restore');clients.push(restore.db);
+ const status=(await restore.db.query("select (select count(*)::int from pg_tables where schemaname='public') public_tables,(select count(*)::int from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname ~ '^ita_') forge_functions,(select count(*)::int from auth.users) auth_users")).rows[0];
+ const authTables=(await restore.db.query("select tablename from pg_tables where schemaname='auth' and tablename<>'schema_migrations' order by tablename")).rows;let authRows=0;
+ for(const t of authTables)authRows+=Number((await restore.db.query(`select count(*)::text n from auth."${t.tablename}"`)).rows[0].n);
+ const sequences=(await restore.db.query("select sequencename,last_value from pg_sequences where schemaname='auth' order by sequencename")).rows;
+ const main=await operationalConnect('main');clients.push(main.db);await verifyFrozen(main.db);const manifest=JSON.parse(readFileSync(path.join(directory,'manifest.json'))),publicMismatches=[];await main.db.query("SET LOCAL TIME ZONE 'UTC'");
+ for(const row of manifest.counts.filter(r=>r.schemaname==='public')){const rows=(await main.db.query(`select to_jsonb(r)::text body from public."${row.tablename}" r order by to_jsonb(r)::text collate "C"`)).rows;const digest=createHash('sha256');for(const r of rows)digest.update(r.body+'\n');if(String(rows.length)!==row.count||digest.digest('hex')!==row.data_hash)publicMismatches.push(row.tablename);}
+ const catalogDiff=compareRecoveryCatalog(manifest.catalog,await recoveryCatalog(main.db));
+ const task=(await main.db.query('select id,status,execution_id,worker_id,lease_until from public.ita_tasks where id=$1',[recoveryIdentity.task_id])).rows[0];
+ const identities={main:main.config.ref,restore:restore.config.ref,distinct:main.config.ref!==restore.config.ref};
+ const integrity=validateRecovery(directory);
+ const result={checked_at:new Date().toISOString(),status:'NO_GO',identities,tls_verified:true,restore_error:{type:'permission denied to change default privileges',file:'public-post.sql',line:736},restore_transaction:{...status,auth_data_rows:authRows,application_schema_and_rows_rolled_back:status.public_tables===0&&status.forge_functions===0&&authRows===0,auth_sequences:sequences,note:'PostgreSQL sequence setval is not transactional; no claim that every managed-platform sequence is untouched; no reset attempted'},main:{ingress_frozen:true,public_tables_count_hash_match_t0:publicMismatches.length===0,public_mismatches:publicMismatches,catalog_match_t0:catalogDiff.mismatches.length===0,catalog_mismatches:catalogDiff.mismatches,paused_task:task,migration_0006_executed:false},recovery_integrity:integrity,backup_created:true,sidecar_preserved_and_verified:true,restore_validated:false,rollback_point_usable:false,unfreeze_executed:false,main_changed_by_restore:false};
+ writeFileSync(path.join(directory,'restore-failure-validation.json'),JSON.stringify(result,null,2),{flag:'wx',mode:0o600});console.log(JSON.stringify(result));
+}catch(e){console.log(JSON.stringify({status:'FAIL',error_type:e.code||e.message||'READONLY_FAILURE_STATE_CHECK_FAILED'}));process.exitCode=1;}
+finally{await Promise.allSettled(clients.map(async db=>{await db.query('ROLLBACK').catch(()=>{});await db.end();}));}

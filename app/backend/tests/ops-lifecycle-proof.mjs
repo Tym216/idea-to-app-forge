@@ -2,6 +2,7 @@
 import {operationalConnect,operationalRoot} from './ops-db-target.mjs';import {verifyFrozen} from './ops-ingress-gate.mjs';
 import {readFileSync,readdirSync,readlinkSync,writeFileSync} from 'node:fs';import path from 'node:path';import {parseEnv} from 'node:util';import {createRequire} from 'node:module';
 const dir=path.join(operationalRoot,'app/worker/.cutover/stage-b-2026-10-08');
+const args=process.argv.slice(2),at=args.indexOf('--record-prefix'),prefix=at<0?'':args[at+1];if(prefix===undefined||!/^[-a-z0-9]*$/.test(prefix))throw new Error('RECORD_PREFIX_INVALID');
 const env=parseEnv(readFileSync(path.join(operationalRoot,'app/worker/.env'),'utf8'));
 const req=createRequire(path.join(operationalRoot,'app/worker/package.json'));const {Daytona}=req('@daytona/sdk');
 const daytona=new Daytona({apiKey:env.DAYTONA_API_KEY,apiUrl:env.DAYTONA_API_URL||'https://app.daytona.io/api',target:env.DAYTONA_TARGET||'us',requestTimeoutMs:15000});
@@ -29,10 +30,10 @@ async function observe(){let db;try{
  return {observed_at:new Date().toISOString(),main_ref:c.config.ref,tls_verified:true,ingress_frozen:true,active,workers,unresolved_journals:unresolved,uncertain_commands:uncertain,paused,sandboxes,status:good?'PASS':'FAIL'};
 }finally{if(db){await db.query('ROLLBACK').catch(()=>{});await db.end();}}}
 try{
- const first=await observe();writeFileSync(path.join(dir,'lifecycle-observation-1.json'),JSON.stringify(first,null,2),{mode:0o600,flag:'wx'});console.log(JSON.stringify(first));if(first.status!=='PASS')throw new Error('FIRST_LIFECYCLE_OBSERVATION_FAILED');
+ const first=await observe();writeFileSync(path.join(dir,prefix+'lifecycle-observation-1.json'),JSON.stringify(first,null,2),{mode:0o600,flag:'wx'});console.log(JSON.stringify(first));if(first.status!=='PASS')throw new Error('FIRST_LIFECYCLE_OBSERVATION_FAILED');
  await new Promise(r=>setTimeout(r,20000));
- const second=await observe();writeFileSync(path.join(dir,'lifecycle-observation-2.json'),JSON.stringify(second,null,2),{mode:0o600,flag:'wx'});console.log(JSON.stringify(second));
+ const second=await observe();writeFileSync(path.join(dir,prefix+'lifecycle-observation-2.json'),JSON.stringify(second,null,2),{mode:0o600,flag:'wx'});console.log(JSON.stringify(second));
  if(second.status!=='PASS'||JSON.stringify(first.sandboxes)!==JSON.stringify(second.sandboxes))throw new Error('LIFECYCLE_OR_ACTIVITY_CHANGED');
  const proof={status:'PASS',confirmed_at:new Date().toISOString(),main_ref:first.main_ref,observation_times:[first.observed_at,second.observed_at],stable_inactive_sandboxes:9,producer_review:{worker_owned_awaited_http_upload:true,independent_upload_queue:false,presigned_source_upload:false,external_write_job_service:false,detached_preview_process:'sandbox runtime; terminated by stop lifecycle'},scope:'known Forge managed-source/Main DB producers and sandbox executors; not an assertion about every internal platform event',inactive_listSessions_400:'not applicable to inactive runtime; prior errors retained',contract_source:'https://www.daytona.io/docs/en/sandboxes/',paused_task_not_resumed:true,no_new_writer:true,sandbox_lifecycle_changed:false,main_migration_0006_executed:false};
- writeFileSync(path.join(dir,'lifecycle-quiescence-proof.json'),JSON.stringify(proof,null,2),{mode:0o600,flag:'wx'});console.log(JSON.stringify(proof));
+ writeFileSync(path.join(dir,prefix+'lifecycle-quiescence-proof.json'),JSON.stringify(proof,null,2),{mode:0o600,flag:'wx'});console.log(JSON.stringify(proof));
 }catch(e){console.log(JSON.stringify({status:'FAIL',error_type:e.code||e.message||'LIFECYCLE_PROOF_FAILED'}));process.exitCode=1;}

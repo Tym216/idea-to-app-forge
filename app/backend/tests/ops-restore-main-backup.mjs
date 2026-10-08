@@ -1,6 +1,9 @@
 /** Restore ONLY the approved Main T0 backup into the pinned empty restore-test. No Main connection. */
 import {readFileSync,writeFileSync} from 'node:fs';import {createHash} from 'node:crypto';import path from 'node:path';
 import {operationalConnect,operationalRoot} from './ops-db-target.mjs';import {nativeTool} from './ops-pg-client.mjs';
+import {validateRecovery,recoveryIdentity} from './ops-recovery-bundle.mjs';
+import {recoveryCatalog,compareRecoveryCatalog} from './ops-recovery-catalog.mjs';
+import {sourceManifest} from '../../worker/src/managed-source.js';
 const qi=s=>'"'+s.replaceAll('"','""')+'"';
 let db;
 try{
@@ -8,8 +11,9 @@ try{
  const at=args.indexOf('--directory');if(at<0||!args[at+1])throw new Error('BACKUP_DIRECTORY_REQUIRED');
  const dir=path.resolve(args[at+1]),prefix=path.join(operationalRoot,'app/worker/.cutover/backups')+path.sep;
  if(!dir.startsWith(prefix)||!/^[-\w/\.]+$/.test(dir))throw new Error('BACKUP_PRIVATE_DIRECTORY_REQUIRED');
+ const recovery=validateRecovery(dir);
  const manifest=JSON.parse(readFileSync(dir+'/manifest.json','utf8'));
- if(manifest.version!==1||manifest.source_ref!=='vfzyimhapttcdxeabvur'||manifest.target_ref!=='zynvesyeqsoeqssgwubj'||manifest.source_ref===manifest.target_ref)throw new Error('RESTORE_IDENTITY_GUARD');
+ if(manifest.version!==2||manifest.source_ref!=='vfzyimhapttcdxeabvur'||manifest.target_ref!=='zynvesyeqsoeqssgwubj'||manifest.source_ref===manifest.target_ref)throw new Error('RESTORE_IDENTITY_GUARD');
  const required=['public.dump','auth-data.dump','auth-order.list','public-pre.sql','public-data.sql','public-post.sql','auth-data.sql'];
  if(required.some(f=>createHash('sha256').update(readFileSync(dir+'/'+f)).digest('hex')!==manifest.archives?.[f]))throw new Error('BACKUP_HASH_MISMATCH');
  const target=await operationalConnect('restore');db=target.db;
@@ -32,17 +36,15 @@ try{
   const digest=createHash('sha256'),rows=(await db.query(`select to_jsonb(r)::text body from ${qi(row.schemaname)}.${qi(row.tablename)} r order by to_jsonb(r)::text collate "C"`)).rows;
   for(const r of rows)digest.update(r.body+'\n');if(digest.digest('hex')!==row.data_hash)mismatches.push({table:row.schemaname+'.'+row.tablename,reason:'restored row/source content hash differs'});
  }
- const functions=(await db.query("select p.proname,pg_get_function_identity_arguments(p.oid) args,pg_get_functiondef(p.oid) definition from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname ~ '^ita_' order by 1,2")).rows;
- const triggersAfter=(await db.query("select c.relname,t.tgname,pg_get_triggerdef(t.oid) definition from pg_trigger t join pg_class c on c.oid=t.tgrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and not t.tgisinternal order by 1,2")).rows;
- const canonical=v=>JSON.stringify(v).replaceAll('\\r\\n','\\n');
- if(canonical(functions)!==canonical(manifest.catalog.functions))mismatches.push({catalog:'public functions'});
- if(canonical(triggersAfter)!==canonical(manifest.catalog.triggers))mismatches.push({catalog:'public triggers'});
- const security=(await db.query("select c.relname,c.relrowsecurity,c.relforcerowsecurity,(select coalesce(jsonb_agg(jsonb_build_object('grantee',case when a.grantee=0 then 'PUBLIC' else pg_get_userbyid(a.grantee) end,'privilege',a.privilege_type,'grantable',a.is_grantable) order by a.grantee,a.privilege_type), '[]'::jsonb) from aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a) acl from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r' and c.relname ~ '^ita_' order by 1")).rows;
- if(canonical(security)!==canonical(manifest.catalog.tables))mismatches.push({catalog:'public table ACL / RLS'});
+ const catalog=await recoveryCatalog(db),catalogComparison=compareRecoveryCatalog(manifest.catalog,catalog);mismatches.push(...catalogComparison.mismatches);
  const v6=(await db.query("select to_regclass('public.ita_changesets') is not null installed")).rows[0].installed;
  if(v6)mismatches.push({reason:'restore unexpectedly contains 0006'});
  const relationships=(await db.query("select t.id task_id,t.status,t.project_id,t.plan_id,p.id matched_project,pl.id matched_plan,(select count(*)::int from public.ita_files f where f.project_id=t.project_id) files,(select count(*)::int from public.ita_messages m where m.project_id=t.project_id) messages,(select count(*)::int from public.ita_snapshots s where s.project_id=t.project_id) snapshots from public.ita_tasks t join public.ita_projects p on p.id=t.project_id left join public.ita_plans pl on pl.id=t.plan_id where t.status='paused'")).rows;
- const result={status:mismatches.length?'FAIL':'PASS',source_ref:manifest.source_ref,target_ref:after.config.ref,main_connected:false,main_modified:false,migration_0006_executed:false,counts_checked:manifest.counts.length-1,functions_checked:functions.length,triggers_checked:triggersAfter.length,mismatches,paused_relationships:relationships,auth_migration_history_preserved:true,tls_verified:true};
+ const preserved=sourceManifest((await db.query('select path,content from public.ita_files where project_id=$1 and not deleted order by path',[recoveryIdentity.project_id])).rows);
+ if(preserved.files.length!==10||preserved.code_hash!==manifest.paused_db_source.code_hash||preserved.files.some(f=>f.path==='package-lock.json'))mismatches.push({reason:'paused DB authority must remain exactly the backed-up 10 files'});
+ const paused=relationships.find(t=>t.task_id===recoveryIdentity.task_id);if(!paused||paused.status!=='paused'||paused.project_id!==recoveryIdentity.project_id||!paused.matched_plan||paused.files!==10)mismatches.push({reason:'paused relationships not preserved'});
+ const sidecarAfter=validateRecovery(dir);if(sidecarAfter.recovery_bundle_hash!==recovery.recovery_bundle_hash)mismatches.push({reason:'sidecar/recovery integrity changed during restore'});
+ const result={status:mismatches.length?'FAIL':'PASS',source_ref:manifest.source_ref,target_ref:after.config.ref,main_connected:false,main_modified:false,migration_0006_executed:false,counts_checked:manifest.counts.length-1,functions_checked:catalog.functions.length,triggers_checked:catalog.triggers.length,structured_catalog:catalogComparison.classifications,sidecar_validated:true,recovery_bundle_hash:recovery.recovery_bundle_hash,paused_db_source_files:preserved.files.length,legacy_lockfile_materialized_into_db:false,mismatches,paused_relationships:relationships,auth_migration_history_preserved:true,tls_verified:true};
  writeFileSync(dir+'/restore-validation.json',JSON.stringify(result,null,2),{mode:0o600,flag:'wx'});
  console.log(JSON.stringify({status:result.status,source_ref:result.source_ref,target_ref:result.target_ref,main_connected:false,counts_checked:result.counts_checked,functions_checked:result.functions_checked,mismatches:mismatches.length}));
  if(mismatches.length)process.exitCode=1;

@@ -1,6 +1,6 @@
 # Main Stage B operational proof — STOP / NO-GO
 
-> 最新状态：narrow gate repair 和经批准的 lifecycle quiescence proof 已 PASS。Paused source 完整保存后发现 DB 外 package-lock.json，已重新 archive 并 STOP；Main 仍冻结，未 backup/restore。之前的 session-400 阻塞保留历史，当前清单以末尾更新为准。
+> 最新状态：按用户 sidecar-only 处置，T0 DB backup + legacy attachment 已创建并封存，integrity PASS；实际 restore 在平台 DEFAULT ACL 权限处失败并回滚业务 schema/data，当前 STOP / NO-GO。Main 保持冻结；paused task 最终 manual-resume 处置仍为独立 blocker。
 
 
 日期：2026-10-08。候选代码 `e8eaaa6e74c53176e9edc905639d274b832d86c5`。本轮授权范围仅 freeze → quiescence → paused source preservation → T0 backup → restore validation；0006/deploy/unfreeze/Phase 3 未批准。
@@ -147,3 +147,69 @@ Extra lockfile hash：`b408286f50406056e24f00c7488f1510bdf5f82700cb486045560e593
 | controlled canary path ready | PASS（权限/程序）：未创建真实 canary task |
 
 **总体 NO-GO。** 需用户决定如何处置 preserved physical lockfile 与 DB source 的差异后，才可继续原 Stage B。Main 保持 frozen；不自动执行 backup/restore、0006、deploy、push、unfreeze 或 Phase 3。
+
+## T0 database backup + legacy sidecar（2026-10-08）
+
+用户正式处置：Main DB 的 10 文件是当前持久化事实；physical 的第 11 文件 package-lock.json 仅作为 legacy sidecar 保留。没有写入 ita_files，没有创建 revision/changeset，没有 resume/cancel task，也没有实现 legacy reconciliation。
+
+### Recovery attachment 与 integrity
+
+Recovery set：`main-T0-20261008-01`，位于 ignored `app/worker/.cutover/backups/main-T0-20261008-01/`。`paused-legacy/` 包含完整 physical/db manifests、独立 package-lock.json、identity.json、原 preservation result 和 attachment-manifest.json。内容在本地独立复制，不以 archived sandbox 为唯一副本。
+
+Attachment 显式记录 DB 10 files / legacy 11 files、两个 code hashes、唯一 extra lockfile 的 content hash，以及 project/task/sandbox identity。所有 payload files 按固定相对路径绑定 SHA256；bundle hash 使用稳定 canonical 对象，不受 property insertion order/filesystem mtime 影响。
+
+DB manifest 引用 attachment 的相对路径、manifest SHA256 和 bundle hash；attachment 引用同一个 recovery_set_id 与 `../manifest.json`。外层 recovery-manifest 同时绑定实际 DB manifest hash、全部 DB archive/SQL payload hashes 和 attachment hash，避免相互嵌套 hash 的循环。Validation/diagnostic logs 不属于 immutable recovery payload，不被用作数据库备份。
+
+- Sidecar bundle hash：`cfa7faada5a6fe1fb2ca778fdcf6f82004558532cac801882c9c2a1cc3194cce`
+- DB manifest SHA256：`14f2c9dec9017177f6bc4090bcfc3d1e3f67e89ecae78aa46de88ad72db40b78`
+- 整体 recovery bundle hash：`d6bededed2e6f4df391db11f4bde42dad55f351592eb6e37622f649669f2f065`
+
+Prepare → seal → verify 均 PASS；真实失败 restore 后再次 verify PASS。额外 lockfile 的完整内容/hash 仍匹配，DB manifest 中 paused source 始终为 10 files，legacy_lockfile_in_db=false。
+
+### 实际 T0 backup
+
+T0 前再次做两次 observation（2026-10-08T14:28:28.969Z / 14:28:54.110Z）：producer/lease/heartbeat/active work/journal 均 0，9 个 sandbox stable stopped/archived。Main ingress frozen；paused task 无 execution/worker/lease。
+
+PG17 客户端从显式 Main env + 严格 CA/hostname 校验连接，Main repeatable-read/read-only transaction export 一个 snapshot，public custom archive 与 Auth data archive 共享它。Manifest 完成时间 `2026-10-08T14:30:41.940Z`。7 个 DB dump/TOC/SQL payload files 全部完成并 hash 绑定。Main 0006 尚未执行。
+
+源 inventory 40 张表；实际备份 public 13 + Auth data 26 = 39 张表。平台管理的 auth.schema_migrations 不复制，目标保留自己的版本历史；平台 schema/roles/password 不重建。当前 Storage/Vault/custom-role 范围沿用 preflight 的 empty 结论。关键 source rows：projects 10、tasks 24、plans 10、messages 22、files 79、snapshots 1；包含 paused project 的 10 files 和 plan/messages/history。
+
+Structured recovery catalog 复用已确认 comparator：逐项比较 function identity/return/language/volatility/null behavior/security/parallel/leakproof/proconfig/owner/EXECUTE/body，保留 SQL literal 语义；表/列 ACL、RLS policies、constraints/NOT NULL 和 triggers 单独比较，不靠 raw rendering hash 或删除 whitespace。新增 sidecar/cross-reference/corruption 和真实 catalog 差异回归与现有 regression 合计 19/19 PASS（本地）。
+
+### 真实 restore：FAIL / STOP
+
+Restore 前确认 target `zynvesyeqsoeqssgwubj` 与 Main `vfzyimhapttcdxeabvur` 不同；public/Forge/Auth data empty，TLS 与 FK/INSERT/trigger checks PASS。Restore 只向 pinned target 连接，在一个 PostgreSQL transaction 中按 pre-data → ordered Auth data → public data → post-data 恢复。没有 Main write connection；没有把 sidecar lockfile 写入数据库。
+
+失败于 `public-post.sql:736`：
+
+```sql
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres;
+```
+
+实际错误：`permission denied to change default privileges`。这是 dump 带入的平台角色 DEFAULT ACL，当前 restore 管理连接无修改该角色默认权限的资格。本轮没有增加角色权限、修改 default privileges、删语句或重跑以让结果通过。按 permission mismatch STOP 规则停止。
+
+只读确认 rollback 后：target public tables=0、Forge functions=0、Auth users=0、全部 26 Auth data tables 总 rows=0。**不能声称整个平台状态完全未变**：PostgreSQL sequence setval 不具有 transaction rollback 语义，当前 auth.refresh_tokens_id_seq last_value=146；没有 reset 它。
+
+Main 只读 post-check：13 张 public 表的 counts/content hashes 与 T0 全部一致，structured function/trigger/RLS/ACL/constraint catalog 与 T0 一致；frozen verifier PASS；旧 task 仍 paused，execution/worker/lease 空。Main 未被 restore 修改，0006 未执行。
+
+Private failure evidence：`.cutover/native-errors/97a2180e-9593-4e26-8a5d-c0b8a6a6c8aa.stderr.log`；恢复后只读状态 `main-T0-20261008-01/restore-failure-validation.json`。未输出 SQL COPY 用户数据或 secret。
+
+### 最终清单（本轮）
+
+| 项目 | 状态 |
+|---|---|
+| Main frozen、只读 isolation | PASS |
+| old Worker / approved lifecycle quiescence | PASS：T0 前重新观测 |
+| paused source preservation/discrepancy disposition | PASS：DB 10-file truth + 独立 11-file sidecar |
+| T0 DB backup created | PASS |
+| DB backup manifest/hash verified | PASS |
+| legacy sidecar/cross-reference/recovery hash verified | PASS |
+| actual restore completed | FAIL：supabase_admin DEFAULT ACL 权限 |
+| restored schema/data/hash/relationship validation | NOT COMPLETED：事务回滚，不能宣称恢复成功 |
+| rollback point genuinely usable | NO：备份完整但未通过真实恢复验证 |
+| revised 0006 artifact unchanged | PASS：`5bea628f986f6953f7aac77d05911a5a3a6cfac735c39c169a15ba84b501a782` |
+| matching Worker artifact ready | PASS：Worker src/package/lock 未变 |
+| controlled canary path ready | PASS（procedure/权限）；未实际 canary |
+| paused task final manual-resume policy | BLOCKED：独立 Main cutover/unfreeze blocker，等待明确决定 |
+
+**整体 NO-GO，Stage B 到此 STOP。** T0 archive 与 sidecar 保留，不删除、不改写 sealed payload；Main 保持 frozen，不执行 0006、deploy/push、unfreeze 或 Phase 3。下一步应只核对 source/target 的平台 DEFAULT ACL 是否等价，再决定范围明确的 restore recipe；不能泛化跳过 ACL 或索取更高角色来绕过平台权限。最终 rollback point 必须以真实数据库恢复验证 + sidecar integrity 两部分均 PASS 为准。
