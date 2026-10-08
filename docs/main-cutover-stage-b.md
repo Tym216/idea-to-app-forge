@@ -1,6 +1,6 @@
 # Main Stage B operational proof — STOP / NO-GO
 
-> 最新状态：按用户 sidecar-only 处置，T0 DB backup + legacy attachment 已创建并封存，integrity PASS；实际 restore 在平台 DEFAULT ACL 权限处失败并回滚业务 schema/data，当前 STOP / NO-GO。Main 保持冻结；paused task 最终 manual-resume 处置仍为独立 blocker。
+> 最新状态（2026-10-09）：DEFAULT ACL 只读对比已完成。supabase_admin 的 3 组 baseline 等价，可作为精确省略候选；postgres 的 3 组真实不等价，按用户规则 STOP，未生成 derived execution plan 或重试 restore。Main 仍 frozen，sealed T0 recovery hash 未变。
 
 
 日期：2026-10-08。候选代码 `e8eaaa6e74c53176e9edc905639d274b832d86c5`。本轮授权范围仅 freeze → quiescence → paused source preservation → T0 backup → restore validation；0006/deploy/unfreeze/Phase 3 未批准。
@@ -213,3 +213,56 @@ Private failure evidence：`.cutover/native-errors/97a2180e-9593-4e26-8a5d-c0b8a
 | paused task final manual-resume policy | BLOCKED：独立 Main cutover/unfreeze blocker，等待明确决定 |
 
 **整体 NO-GO，Stage B 到此 STOP。** T0 archive 与 sidecar 保留，不删除、不改写 sealed payload；Main 保持 frozen，不执行 0006、deploy/push、unfreeze 或 Phase 3。下一步应只核对 source/target 的平台 DEFAULT ACL 是否等价，再决定范围明确的 restore recipe；不能泛化跳过 ACL 或索取更高角色来绕过平台权限。最终 rollback point 必须以真实数据库恢复验证 + sidecar integrity 两部分均 PASS 为准。
+
+## Platform DEFAULT ACL / sequence 只读 proof（2026-10-09）
+
+本轮只对 Main 与 restore target 执行 READ ONLY PostgreSQL catalog/state 查询，以及本地读取 sealed archive/SQL；没有 GRANT/REVOKE/default privilege/sequence reset/restore 操作。未重建 T0 backup，未修改 sealed payload。原 recovery hash 仍为 `d6bededed2e6f4df391db11f4bde42dad55f351592eb6e37622f649669f2f065`。
+
+`pg_default_acl` 按 owner role、namespace/global scope、object type、grantee、逐个 privilege、grant option、grantor 比较，忽略 OID/rendering 排序差异。public 相关 DEFAULT ACL source 与 target 各 6 组，无 global-scope entry。枚举 sealed public.dump 的 6 个 DEFAULT ACL TOC entries 与 public-post.sql 全部 18 条 ALTER DEFAULT PRIVILEGES 语句，每一条的 source/target semantics、replay capability、分类完整保存于 ignored `restore-plans/main-T0-20261008-01-default-acl-01/readonly-proof.json`。
+
+| Owner / public object type | Source vs target | Classification |
+|---|---|---|
+| supabase_admin / sequences | 完全等价 | platform baseline、target already satisfied、restore role 无权重放、精确省略候选 |
+| supabase_admin / functions | 完全等价 | 同上 |
+| supabase_admin / tables | 完全等价 | 同上 |
+| postgres / sequences | 不等价 | app/restore-role-owned；必须完整恢复，不能跳过 |
+| postgres / functions | 不等价 | 同上 |
+| postgres / tables | 不等价 | 同上 |
+
+Restore role=postgres、非 superuser、对 supabase_admin 无 owner privileges。T0 的 Forge authority objects 全部 owner=postgres（13 tables / 34 functions），因此 supabase_admin 的 3 条 TOC group（12 个 GRANT statements）不是 Forge-owned authority；它们只是 eligible omission candidates，**未执行 filter 或跳过全部 DEFAULT ACL**。
+
+失败项 `supabase_admin/public/sequences → postgres` 的 SELECT/UPDATE/USAGE、grant option=false、grantor=supabase_admin 与 target 完全一致。其他平台语句同样等价。
+
+但 postgres/public 有 3 项真实差异（grantor/grant option 一致，差异是权限集合）：
+
+- Sequences：target 向 anon/authenticated/service_role 多授予 SELECT、UPDATE、USAGE；source 该 schema-specific default ACL 没有这些 grant。
+- Functions：target 向上述三角色多授予 EXECUTE；source 该 schema-specific default ACL 没有这些 grant。
+- Tables：target 向上述三角色多授予 SELECT、INSERT、UPDATE、DELETE；source 只保留 REFERENCES、TRIGGER、TRUNCATE、MAINTAIN。postgres 自身权限一致。
+
+原 SQL payload 对这些 app-owned DEFAULT ACL 是 additive GRANT，不会自动撤去 target 多出的权限。因此仅过滤 supabase_admin 的失败语句，最终 DEFAULT ACL 仍不会与 Main 相同。按照“source/target 不等价则 STOP”的要求，没有推定额外对齐权限，没有生成执行用 derived filter/plan，也没有实际 restore retry。
+
+### Sequence facts / 边界
+
+Stage A 的 restore preflight/native connection/Auth compatibility/rights records **未保存 target 失败前 last_value/is_called**。原值 UNKNOWN，不能猜成 1。
+
+Sealed T0 中只有两条 setval：
+
+```sql
+SELECT pg_catalog.setval('public.ita_audit_log_id_seq', 69, true);
+SELECT pg_catalog.setval('auth.refresh_tokens_id_seq', 146, true);
+```
+
+当前 target 在 public/auth restore scope 内只有 auth.refresh_tokens_id_seq，last_value=146、is_called=true，结构与 source 兼容；public tables=0/Auth users=0。失败 attempt 创建的 public audit sequence 随 DDL rollback 已不存在。该 Auth sequence 是唯一已知持久残留，值已等于 immutable T0 的明确 setval；没有 reset 或略过 sequence 验证。
+
+Main 当前 Auth sequence 已为 148，不能把它当作 T0 最终值；原因本轮没有调查或归因，也没有改它。真正重试必须以 sealed T0 的 146/true 和 audit 69/true 为依据，而不是读取当前 Main 后替换 recovery payload。因 DEFAULT ACL proof 不通过，尚未批准或执行 sequence retry precondition/实际 restore。
+
+### 当前结论
+
+- 平台 supabase_admin DEFAULT ACL exact equivalence：PASS，3 个 TOC groups / 12 statements 为候选。
+- postgres/app-owned DEFAULT ACL equivalence：FAIL，3 个实际差异。
+- 原始 sequence baseline：UNKNOWN（证据缺失）；当前残留与 T0 setval 一致，记录但未重试。
+- 原 sealed T0 + legacy sidecar integrity：PASS，原 hash 未变。
+- derived execution plan / real restore / rollback-point proof：NOT RUN / NOT PASSED。
+- paused task manual-resume/reconciliation：保持后续独立 blocker，不处理。
+
+**STOP / NO-GO。** Main frozen；未执行任何 default ACL 对齐、sequence reset、restore retry、0006、deploy/push/unfreeze 或 Phase 3。建议后续仅授权 restore target 的 postgres/public 三组 DEFAULT ACL 按 source 精确对齐，再生成包含平台 exact omission 和 sequence preconditions 的 derived plan；原始 archive/SQL继续不改写。
