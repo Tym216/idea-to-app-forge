@@ -266,3 +266,67 @@ Main 当前 Auth sequence 已为 148，不能把它当作 T0 最终值；原因�
 - paused task manual-resume/reconciliation：保持后续独立 blocker，不处理。
 
 **STOP / NO-GO。** Main frozen；未执行任何 default ACL 对齐、sequence reset、restore retry、0006、deploy/push/unfreeze 或 Phase 3。建议后续仅授权 restore target 的 postgres/public 三组 DEFAULT ACL 按 source 精确对齐，再生成包含平台 exact omission 和 sequence preconditions 的 derived plan；原始 archive/SQL继续不改写。
+
+## Restore-target DEFAULT ACL alignment / real retry（2026-10-09）
+
+本轮按用户 narrow approval，仅修改 restore target `forge-main-restore-test / zynvesyeqsoeqssgwubj`。Main `vfzyimhapttcdxeabvur` 全程只读，保持 frozen；未执行 Main 0006、deploy/push/unfreeze 或 Phase 3。没有重建 T0 backup，没有修改任何 sealed archive、SQL payload、manifest 或 legacy sidecar。
+
+### Baseline alignment 与派生计划
+
+修改前完整 `pg_default_acl`（所有 owner/schema/global/object type/grantee/privilege/grant option/grantor）快照 hash：`0bf3f9cc4d7508617058b3909937a500d234c3a6ab3770588c43a2c1abff36d9`。快照、9 条精确 REVOKE 和对应 inverse SQL 均保存到独立 ignored plan directory。Inverse 只恢复 restore-test 自身原 baseline，本轮没有执行 inverse。
+
+仅撤回 postgres/public sequences/functions/tables 中已授权的 24 项 extra privileges；没有 REVOKE ALL、没有修改 supabase_admin、global 或其他 schema。事务中确认 public/global DEFAULT ACL 与 source 完全等价，其他 protected scopes 未变。public alignment hash：`d0a57fe198cf1097a1e543f2de8c10e4f9678c936d585b481275d1c5d1615eed`。
+
+新 derived plan：`main-T0-20261008-01-derived-02`；hash `5ca7d021a28e775a386adbe0c4ac5efebfba43f7cb34ec9a3ca66e04f577b88e`。执行器校验 plan hash、original recovery identity/hash、所有 derived file hashes 和 exact omission；过滤结果必须与原 post-data 去掉那 12 条语句后的内容逐字一致。只省略 supabase_admin/public 三个已证明等价且不能由 postgres 重放的 DEFAULT ACL TOC groups（12 statements）；postgres/app-owned 六条 DEFAULT ACL statements 和其他 post-data 完整保留。
+
+原 recovery bundle hash 仍为 `d6bededed2e6f4df391db11f4bde42dad55f351592eb6e37622f649669f2f065`；原 DB manifest hash 仍为 `14f2c9dec9017177f6bc4090bcfc3d1e3f67e89ecae78aa46de88ad72db40b78`；sidecar bundle hash 仍为 `cfa7faada5a6fe1fb2ca778fdcf6f82004558532cac801882c9c2a1cc3194cce`。
+
+### Retry preconditions / 真正恢复
+
+再次确认 target public tables/functions=0、Storage objects/buckets=0、26 张 Auth data tables 总 rows=0；restore-scope 唯一 sequence 为 auth.refresh_tokens_id_seq=146/true，public audit sequence 不存在。原第一次失败前 sequence state 继续记录 UNKNOWN，未伪造，也未 reset 已等于 T0 的值。没有额外 residue，Auth 非 FK active triggers=0，target postgres 非 superuser 且无 supabase_admin owner privileges。Main pre-check frozen/paused isolation/public T0 hashes/catalog 均 PASS。
+
+使用严格 TLS、固定 restore identity，在一个真实 PostgreSQL transaction 中执行原 pre-data → 原 ordered Auth data → 原 public data → derived post-data。**事务成功提交**。没有提权，没有关闭 FK、RLS 或 TLS。新 driver 和 validation evidence 在 derived plan directory，原 T0 files 保持 byte-for-byte 不变。
+
+### 完整验证：存在真实 object ACL mismatch，STOP
+
+| 验证项 | 结果 |
+|---|---|
+| 39 张备份表 counts/content hashes | PASS |
+| 34 functions：identity/body/attributes/owner/EXECUTE | PASS：semantic=0、metadata=0 |
+| 13 triggers、RLS/policies、constraints/NOT NULL、column ACL | PASS |
+| postgres/public 与 supabase_admin platform DEFAULT ACL、其他 scope | PASS：完整 target DEFAULT ACL 与已对齐 precondition 完全等价 |
+| Auth sequence | PASS：146/true |
+| public audit sequence | PASS：69/true |
+| sequence structure/owner、target Auth schema_migrations 保留 | PASS |
+| project → tasks/plans/messages/files/snapshots、task → plan | PASS：无 orphan/project mismatch |
+| paused DB 10-file state + plan/messages | PASS：没有导入 lockfile，没有 resume |
+| legacy physical 11-file sidecar/content/hash | PASS |
+| Main restore 前后全部 inventory counts/hash、catalog、DEFAULT ACL、sequence、paused isolation | PASS：unchanged；frozen verifier PASS |
+| 所有 sealed recovery payload / cross-reference hashes | PASS |
+| public table object ACL | **FAIL：13 张 Forge 表各有 8 项 extra grants** |
+| rollback point genuinely usable | **FAIL：object ACL 未忠实恢复** |
+
+只读 failure evidence 确认：13 张表中 anon、authenticated 各额外具有 `MAINTAIN / REFERENCES / TRIGGER / TRUNCATE`，合计 **104 项 extra grants**；没有 missing grants；table owner/RLS flags 等其他字段完全一致。涉及 `ita_audit_log / ita_files / ita_memories / ita_memory_suggestions / ita_messages / ita_plan_feedback / ita_plans / ita_preview_recoveries / ita_project_deletions / ita_projects / ita_snapshots / ita_task_feedback / ita_tasks`。
+
+DEFAULT ACL 等价与现有对象 ACL 等价是不同判据：恢复时 CREATE TABLE 会应用 target 已对齐的 source default grants，sealed post-data 的对象授权没有把这 104 项 inherited extra grants 撤回。**不能因为 DEFAULT ACL 或数据正确就忽略 TRUNCATE 等真实权限差异**。本轮授权只允许 DEFAULT ACL 对齐，没有授权额外 object ACL repair；没有执行精确 table REVOKE、inverse、再次 restore、清库或新 backup。
+
+Ignored evidence 位于 `app/worker/.cutover/restore-plans/main-T0-20261008-01-derived-02/`：`derived-plan.json`、`target-default-acl-before.json`、`inverse-target-baseline.sql`、`target-default-acl-aligned.json`、`restore-retry-preconditions.json`、`restore-validation.json`、`table-catalog-diff.json`、`main-before-restore.json`、`main-after-restore.json`。原失败 evidence 和 T0 均保留。
+
+新增本地 regression 5/5 PASS：精确 24-permission alignment/inverse、protected scope invariants；exact omission/identity/filter、禁止扩大 omission/伪造 equivalence/替换文件；恢复 bundle/sidecar integrity；structured catalog semantics/permission/RLS/constraint detection。`node --check` 和 `git diff --check` PASS。Worker/runtime/frontend 未修改；未重跑无关检查。
+
+### Stage B final GO / NO-GO
+
+| 项目 | 状态 |
+|---|---|
+| ingress actually frozen | PASS：真实 Main verifier |
+| old Worker / remote quiescence | PASS：沿用 T0 lifecycle/producer proof；本轮未启动 Worker/sandbox |
+| paused physical source preserved / discrepancy disposition | PASS：DB 10 + 独立 sidecar 11，final resume policy 另列 blocker |
+| T0 backup / manifest / sidecar intact | PASS |
+| actual restore transaction | PASS：已提交，target 不再是 empty retry target |
+| restored complete schema/data/hash/ACL validation | **FAIL：104 extra object grants** |
+| rollback point genuinely usable | **FAIL** |
+| revised 0006 unchanged | PASS：`5bea628f986f6953f7aac77d05911a5a3a6cfac735c39c169a15ba84b501a782` |
+| matching Worker artifact / controlled canary path | PASS：准备状态未变，未部署/运行 canary |
+| paused final manual-resume / legacy reconciliation policy | BLOCKED：独立后续决定，本轮未处理 |
+
+**STOP / NO-GO。** Main 保持 frozen；恢复目标保留本次已提交的恢复状态用于核对，不自动重跑 empty-target recipe。后续若获授权，最小范围应为 restore-test 对象 ACL 的精确 source-vs-target 差集修复及完整只读复验；不要改 sealed T0、不要修改 Main、不要把该差异判为 comparator noise。
