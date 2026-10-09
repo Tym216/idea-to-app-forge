@@ -330,3 +330,75 @@ Ignored evidence 位于 `app/worker/.cutover/restore-plans/main-T0-20261008-01-d
 | paused final manual-resume / legacy reconciliation policy | BLOCKED：独立后续决定，本轮未处理 |
 
 **STOP / NO-GO。** Main 保持 frozen；恢复目标保留本次已提交的恢复状态用于核对，不自动重跑 empty-target recipe。后续若获授权，最小范围应为 restore-test 对象 ACL 的精确 source-vs-target 差集修复及完整只读复验；不要改 sealed T0、不要修改 Main、不要把该差异判为 comparator noise。
+
+## Restore-target exact table object ACL normalization / final revalidation（2026-10-09）
+
+本轮用户单独批准 restore-target-only exact object ACL repair。仅向 `forge-main-restore-test / zynvesyeqsoeqssgwubj` 执行表 REVOKE；Main `vfzyimhapttcdxeabvur` 连接全为只读事务，保持 frozen。未清空 target、未重新 restore、未改 sealed T0、未执行 Main 0006、deploy/push/unfreeze 或 Phase 3。
+
+### 不可变实际 repair input
+
+执行前重新读取 sealed T0 catalog 和实际 restored target catalog；以 set difference 生成输入，不从预期列表猜修复项。确认与上一轮已保存的 `table-catalog-diff.json` 完全相同：missing=0、extra=104、affected tables=13，grantees 恰为 anon/authenticated，privileges 恰为 MAINTAIN/REFERENCES/TRIGGER/TRUNCATE，grantor=postgres、grant option=false。其他 table metadata 及完整 recovery pre-validation 均无额外差异。
+
+保存完整 target table ACL snapshot/hash、actual diff、104 条 exact REVOKE、对应 inverse SQL 和 immutable repair manifest。没有 REVOKE ALL、schema-wide operation、service_role ACL mutation、DEFAULT/function/sequence/column ACL mutation。Inverse 只用于撤销本次 restore-test repair，本轮未执行。
+
+| Identity / hash | 值 |
+|---|---|
+| Original recovery set | main-T0-20261008-01 |
+| Original bundle hash | d6bededed2e6f4df391db11f4bde42dad55f351592eb6e37622f649669f2f065 |
+| Original DB manifest hash | 14f2c9dec9017177f6bc4090bcfc3d1e3f67e89ecae78aa46de88ad72db40b78 |
+| Prior derived-plan hash | 5ca7d021a28e775a386adbe0c4ac5efebfba43f7cb34ec9a3ca66e04f577b88e |
+| Pre-repair table ACL hash | 7bc8de31709c8c84f09db6d84573da012cc791243a96cedb9ce88956192e7037 |
+| Repair manifest hash | b872e1980e7fff46d5020d0447d2b36866fbe624a3280bc76ba026b84320b842 |
+| Expected / actual post-repair ACL hash | 25c6157122025145ba189c422062321c0dd52d5bdd0de5863e6b13fc3643d29f |
+| New derived-plan hash | 97d68043266fa6ecd579240515a2a94db8ec3764172e7b88968ad32f590dc534 |
+
+独立 plan directory：`app/worker/.cutover/restore-plans/main-T0-20261008-01-derived-03-object-acl/`。其中 `repair-manifest.json` 绑定原 bundle、DB manifest、prior plan、actual diff evidence、pre-repair snapshot、exact SQL/inverse SQL hashes 和 post-repair expected hash。`derived-plan.json` 链接原 recipe，明确增加 **restore → DEFAULT ACL semantic validation → exact table object ACL normalization → complete catalog/data validation**。原 archive/SQL 和 prior derived plan 均不改写。
+
+### 正式 recipe 实现与事务边界
+
+`ops-table-acl-repair.mjs` 提供实际 ACL delta、stable hash、strict authorization check、SQL generation 和 normalization；它只接受当前已经明确批准的 13-table/104-extra/0-missing 集合。未知/减少/新增差异、service_role extra、grant option 或 owner/RLS metadata drift 均停止；不会泛化成“所有权限都修”。
+
+`ops-derived-table-acl-repair.mjs` 是 recipe continuation，不是手工 SQL patch。它校验原 recovery bundle/parent plan 的完整性，保存输入后，对固定 restore identity 开启事务；按 canonical table order 获取 transaction-scoped locks，重新校验 actual ACL/hash，执行 manifest 中 104 条逐表/逐角色/逐 privilege REVOKE。完整 structured table ACL missing=0/extra=0 且其他 catalog、DEFAULT ACL/sequence 均未变时才 COMMIT；任一不符 ROLLBACK/STOP。
+
+本次事务成功提交；提交后再次通过共享 `ops-recovery-validation.mjs` 进行完整只读验证。原 restore executor 同样复用该验证器，避免两套验证标准。这次没有重新运行原 empty-target executor；本次操作不能在已修好的 target 上盲目重复运行。
+
+对应命令（本次已执行，记录用途，**不是要求重跑**）：
+
+```bash
+node app/backend/tests/ops-derived-table-acl-repair.mjs --ack-target-exact-table-acl-repair
+```
+
+### 真实最终验证
+
+| 检查 | 结果 |
+|---|---|
+| 39 张 backed-up public/Auth 表 counts/content hashes | PASS |
+| 34 functions identity/body/attributes/owner/EXECUTE | PASS：semantic=0 / metadata=0 |
+| 13 triggers、RLS/policies、constraints/NOT NULL、column ACL | PASS |
+| 13 张 table object ACL：完整 source-vs-target compare | PASS：missing=0 / extra=0 |
+| postgres/public DEFAULT ACL 与 T0、supabase_admin platform DEFAULT ACL、global/其他 scopes | PASS：完整语义等价且 repair 未改变 |
+| sequence values/owners/structure | PASS：Auth 146/true、audit 69/true |
+| target Auth schema_migrations 历史 | PASS：保留 target 自身版本历史 |
+| project → task/plan/message/file/snapshot、task → plan | PASS：无 orphan/project mismatch |
+| paused DB 10-file truth、plan/messages/relationships | PASS：code hash 未变，无 lockfile 导入，无 resume |
+| legacy physical 11-file sidecar/content/hash | PASS：独立保存，不写入 DB |
+| 原 sealed recovery bundle/archive/SQL/manifest/sidecar hashes | PASS：byte-for-byte 未变 |
+| Main repair 前后全 inventory counts/hash/catalog/DEFAULT ACL/sequence/paused isolation | PASS：unchanged；frozen verifier PASS |
+| TLS / source-target identity / restore role | PASS：严格 CA，postgres 非 superuser，无 platform owner 提权 |
+| rollback point genuinely usable | **PASS：真实 DB restore + sidecar integrity 均验证** |
+| Stage B backup/restore operational proof | **PASS** |
+
+完整 ignored final record：`...derived-03-object-acl/final-recovery-validation.json`；包含真实 restored counts/hashes、ACL delta/hash、catalog classification、sequence state、relationship checks、原 recovery/sidecar refs 和 Main pre/post comparison。`pre-repair-table-acl.json`、`repair-manifest.json`、`exact-table-revoke.sql`、`inverse-table-acl.sql`、`repair-commit.json`、`main-before-repair.json`、`main-after-repair.json` 均保留。历史失败记录不覆盖、不改成 PASS。
+
+相关本地回归 **8/8 PASS**：exact defaults/inverse/protected scopes，exact derived omission/identity/filter，recovery/sidecar corruption，structured catalog differences，exact 104-object ACL repair/inverse/service-role/RLS/column preservation，stale/broadened/missing grant rejection，以及 post-write comparison failure 必须 rollback 所有 REVOKE。Syntax / diff-check PASS。未修改 Worker/runtime/frontend 或 revised 0006。
+
+### 最终状态：Stage B PASS，Main cutover 仍 NO-GO / STOP
+
+- Stage B T0 backup + 实际 restore + 完整 ACL/data/schema/sequence/sidecar revalidation：**PASS**。
+- revised 0006 hash 不变：`5bea628f986f6953f7aac77d05911a5a3a6cfac735c39c169a15ba84b501a782`；本轮未执行。
+- Main ingress frozen；旧 Worker/remote quiescence 沿用已批准的 T0 proof，本轮未启动任何 Worker/sandbox。
+- matching Worker artifact / controlled canary 准备状态未变，未部署、未运行 Main canary。
+- **paused task 最终 manual-resume / legacy reconciliation policy 仍是 Main cutover/unfreeze 前的独立 blocker**，本轮没有实现、取消或吸收 legacy physical source。
+- 没有 Main cutover 最终批准；没有 push/deploy/unfreeze 或 Phase 3。
+
+**到此 STOP。** 本次 PASS 只证明可用的数据库 disaster-recovery restore point（T0 DB + legacy sidecar），不等于 Main 0006 已执行、真实 canary 已通过或 App Version/historical preview 能力已完成。
