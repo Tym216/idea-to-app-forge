@@ -20,14 +20,16 @@ export function PreviewPane({ label, url, state = 'empty', recovery, recoveryErr
 }) {
   const [nonce, setNonce] = useState(0);
   const recovering = recoveryPending || recovery?.status === 'queued' || recovery?.status === 'running';
-  const problem = recoveryError || (recovery?.status === 'failed' ? recovery.error || '预览恢复失败' : '');
-  if (recovering || problem) return (
+  const transient=/network|fetch|timeout|503|502/i.test(recoveryError || '');
+  const waiting=!!(recovering || transient);
+  const problem=recovery?.status==='failed' ? recovery.error || '预览恢复失败' : !waiting ? recoveryError || '' : '';
+  if (waiting || problem) return (
     <div className="h-full grid place-items-center p-6" role="status">
       <div className="text-center max-w-[420px]">
         {problem ? <AlertTriangle className="h-6 w-6 mx-auto" /> : <Loader2 className="h-6 w-6 mx-auto animate-spin" />}
-        <p className="mt-2 font-medium">{problem ? '预览暂不可用' : recovery?.phase === 'starting' ? '正在唤醒沙箱' : recovery?.phase === 'server' ? '正在启动预览服务' : recovery?.status === 'queued' ? '等待 Worker 检查预览' : '正在检查预览'}</p>
-        <p className="mt-2 text-[13px] text-[var(--text-2)]">{problem || '恢复已有应用，不调用模型。若长时间等待，请确认 Worker 在线，或等待当前构建结束。'}</p>
-        {onRecover && <button type="button" onClick={onRecover} disabled={!!recoveryPending} className="btn-ghost mt-3 px-3 py-2">重新检查预览</button>}
+        <p className="mt-2 font-medium">{problem ? '预览暂不可用' : '正在启动预览…'}</p>
+        <p className="mt-2 text-[13px] text-[var(--text-2)]">{problem || '正在等待 Worker 恢复已有应用，不调用模型。Worker 离线时会保持等待；应用和源码仍已保存。'}</p>
+        {problem && onRecover && <button type="button" onClick={onRecover} disabled={!!recoveryPending} className="btn-ghost mt-3 px-3 py-2">重新检查预览</button>}
       </div>
     </div>
   );

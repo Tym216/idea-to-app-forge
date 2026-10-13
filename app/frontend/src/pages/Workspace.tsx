@@ -1,3 +1,4 @@
+import { previewRecoveryKey, requestPreviewOnce } from '@/lib/workspaceState';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { AppVersion, Message, Plan, PlanFeedback, PreviewRecovery, Project, ProjectFile, Task } from '@/lib/supabase';
@@ -35,28 +36,31 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   const [feedback, setFeedback] = useState<PlanFeedback[]>([]);
   const [error, setError] = useState('');
   const autoSubmitted = useRef(false);
-  const autoRecovered = useRef('');
+  const autoRecovered = useRef(new Set<string>());
+  const recoveryRequest=useRef<Promise<void>|null>(null);
   const readFailures=useRef(0);
   const [recovery, setRecovery] = useState<PreviewRecovery | null>(null);
   const [recoveryError, setRecoveryError] = useState('');
   const [recoveryPending, setRecoveryPending] = useState(false);
 
   const [entryChecked,setEntryChecked] = useState('');
-  const recoverPreview = useCallback(async () => {
-    setRecoveryError('');
-    readFailures.current=0;
-    setRecoveryPending(true);
-    try {
-      let job:PreviewRecovery|null=null;
-      for(let attempt=0;attempt<3;attempt++) {
-        try { job=await requestPreviewRecovery(projectId);break; }
-        catch(e) { if(attempt===2 || !/network|fetch|timeout|503|502/i.test(String(e))) throw e;await new Promise(r=>setTimeout(r,500*(attempt+1))); }
-      }
-      setRecovery(job);setEntryChecked(projectId);
-    }
-    catch (e) { setRecoveryError(e instanceof Error ? e.message : String(e)); }
-    finally { setRecoveryPending(false); }
-  }, [projectId]);
+  const recoverPreview = useCallback(() => {
+    if(recoveryRequest.current) return recoveryRequest.current;
+    const operation=(async()=>{
+      setRecoveryError('');
+      readFailures.current=0;
+      setRecoveryPending(true);
+      try {
+        // A timed-out submission may already be queued; do not blindly submit another job.
+        const job=await requestPreviewRecovery(projectId);
+        setRecovery(job);setEntryChecked(projectId);
+      } catch(e) {setRecoveryError(e instanceof Error ? e.message : String(e));}
+      finally {setRecoveryPending(false);}
+    })();
+    recoveryRequest.current=operation;
+    void operation.then(()=>{if(recoveryRequest.current===operation) recoveryRequest.current=null;});
+    return operation;
+  },[projectId]);
 
   const refresh = useCallback(async () => {
     try {
@@ -91,12 +95,9 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   }, [refresh]);
 
   useEffect(() => {
-    if (!project?.sandbox_id || project.deletion_state || tasks.some((t) => t.mode === 'build' && ['queued', 'running'].includes(t.status))) return;
-    const key = [project.id,project.sandbox_id,project.workspace_revision,project.workspace_hash].join(':');
-    if (autoRecovered.current === key) return;
-    autoRecovered.current = key;
-    void recoverPreview();
-  }, [project, tasks, recoverPreview]);
+    const key=previewRecoveryKey(project,tasks,files.length>0);
+    void requestPreviewOnce(key,autoRecovered.current,recoverPreview);
+  },[project,tasks,files,recoverPreview]);
 
   useEffect(() => {
     if (!recovery || !['queued', 'running'].includes(recovery.status)) return;

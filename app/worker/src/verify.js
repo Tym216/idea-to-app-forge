@@ -81,7 +81,7 @@ async function open(sink) {
 async function until(page, fn) {
   const end = Date.now() + T; let last = { ok: false, detail: '超时' };
   while (Date.now() < end) {
-    try { last = await fn(); } catch (e) { last = { ok: false, detail: short(e.message) }; }
+    try { last = await fn(); } catch (e) { last = { ok: false, detail: short(e.message), failureType: 'automation_error' }; }
     if (last.ok) return last;
     await page.waitForTimeout(150);
   }
@@ -168,9 +168,9 @@ for (const check of spec.checks || []) {
         }); break;
         default: r = { ok: false, detail: '未知操作 ' + s.op };
       }
-    } catch (e) { r = { ok: false, detail: short(e.message) }; }
+    } catch (e) { r = { ok: false, detail: short(e.message), failureType: 'automation_error' }; }
     const observed = await snapshot(page, check.steps);
-    stepResults.push({ index: i + 1, op: s.op, ok: r.ok,
+    stepResults.push({ index: i + 1, op: s.op, ok: r.ok, failureType: r.failureType || null,
       ...(s.op.startsWith('expect') ? { expected: s.op === 'expectTrue' ? 'true' : (s.contains ?? s.equals ?? s.min ?? 'condition'), actual: r.ok ? 'matched' : (r.detail || 'false') } : {}),
       observed });
     if (!r.ok) failed = '步骤 ' + (i + 1) + ' ' + s.op + ': ' + r.detail;
@@ -286,6 +286,25 @@ export async function runVerification({ sandbox, sandboxId, checks, url = VERIFY
 
 // ------------------------------------------------------------------ 结果分类与反馈
 /** Browser evidence is separate from approved acceptance: failed checks are never relabelled verified. */
+/** A timeout is not a false assertion; health must be independently established. */
+export function coreHealthVerified(base) {
+  return !!base && Array.isArray(base.blocking) && base.blocking.length === 0
+    && base.placeholder === false && (base.chars > 0 || base.visible >= 3);
+}
+export function automationInconclusive(check) {
+  const failed = check.stepResults?.find(step => !step.ok);
+  if (!failed || failed.actual === false || failed.actual === 'false') return false;
+  return failed.failureType === 'automation_error'
+    || /locator\.[a-z]+:.*(?:Timeout|timed out)|Timeout \d+ms exceeded|strict mode violation|invalid selector/i.test(check.reason || '');
+}
+/** Preserve immutable checks/diagnostics when interpreting pre-hotfix stored evidence. */
+export function reclassifyStoredVerification(result, acceptance) {
+  if (!result?.items || !result.base) return null;
+  return classifyResult({ base: result.base, screenshots: result.screenshots,
+    checks: result.items.map(item => ({ ...item, status: item.status === 'verified' ? 'pass' : 'fail',
+      blocking: /^页面异常:|^无法打开页面:|^HTTP |^请求失败/.test(item.reason || '') ? [item.reason] : [] })) }, acceptance);
+}
+
 export function classifyResult(result, acceptance) {
   if (!result || result.toolError) return { kind: 'tool_error', toolError: result?.toolError || '验收工具无结果', items: [], base: null };
   const byId = new Map((result.checks || []).map((c) => [c.id, c]));
@@ -300,8 +319,9 @@ export function classifyResult(result, acceptance) {
     // An explicit false assertion is evidence of unmet approved acceptance, even if
     // a composite expression does not reveal which subexpression was false.
     const failedStep = c.stepResults?.find((step) => !step.ok);
-    const disabled = failedStep?.observed?.elements?.some((el) => el.disabled === true);
-    if (a.severity === 'core' && disabled) return { ...shared, status: 'blocker' };
+    // Never infer a broken action from unrelated disabled controls in a diagnostic snapshot.
+    if (coreHealthVerified(base) && automationInconclusive(c))
+      return { ...shared, status: 'warning', code: 'AUTOMATION_INCONCLUSIVE' };
     const reason = String(c.reason || '');
     const explicitFailure = /表达式为假|期望包含|expectText.*实际|数量为|元素不可见|元素仍可见|值未变化/.test(reason)
       || failedStep?.actual === false || failedStep?.actual === 'false';
@@ -317,33 +337,29 @@ export function classifyResult(result, acceptance) {
 }
 
 export function formatObservation(v, round, maxRounds) {
-  if (v.kind === 'tool_error') return `浏览器验收环境故障，本次无法判断应用：${v.toolError}`;
-  const heading = { passed: '验收全部通过。', blocker: '核心故障，任务不能标记完成。',
-    inconclusive: '验收证据不足；当前版本可预览，但不能声称所有条件已验证。',
-    success_with_warnings: '应用可预览，验收有警告。' }[v.kind];
-  const lines = [heading, `第 ${round}/${maxRounds} 次浏览器验收`];
-  for (const b of (v.base.blocking || []).slice(0, 3)) lines.push(`- 核心故障: ${b}`);
+  if (v.kind === 'tool_error') return '浏览器验收环境故障，本次无法判断应用。详细原因已保存在开发者诊断中。';
+  const heading = { passed: '应用已生成并可以预览。验收全部通过。',
+    blocker: '应用存在阻断问题，任务不能标记完成。',
+    inconclusive: '应用可以预览；部分交互尚未得到自动验收结论。',
+    success_with_warnings: '应用已生成并可以预览。自动验收发现非阻塞警告，你仍可以打开预览继续测试。' }[v.kind];
+  const lines = [heading, '第 ' + round + '/' + maxRounds + ' 次浏览器验收'];
+  if (v.base.blocking?.length) lines.push('页面基础检查未通过，详细证据已保存。');
   for (const i of v.items) {
     const mark = { verified: '✓', warning: '警告', blocker: '阻断', inconclusive: '证据不足', missing_config: '缺少配置', unverifiable: '无法验证' }[i.status];
-    lines.push(`- ${i.id} ${mark} ${i.action} → ${i.expect}${i.reason ? ` | ${i.reason}` : ''}`);
-    if (i.status !== 'verified') {
-      const failed = i.stepResults.find((step) => !step.ok);
-      if (failed) lines.push(`  步骤 ${failed.index} ${failed.op}: expected=${JSON.stringify(failed.expected ?? null)}, actual=${JSON.stringify(failed.actual ?? null)}, observed=${JSON.stringify(failed.observed).slice(0, 450)}`);
-    }
+    lines.push('- ' + i.id + ' ' + mark + ' ' + i.action + ' → ' + i.expect);
   }
-  if (v.base.warnings?.length) lines.push(`非阻断警告 ${v.base.warnings.length} 条,例如: ${v.base.warnings[0]}`);
-  if (v.kind === 'blocker') lines.push('保留代码和预览，等待用户选择修复或修订验收条件；不自动重试。');
-  else if (v.kind !== 'passed') lines.push('可继续使用当前版本；若要修复，请提交新任务；验收定义有误则通过 Plan 修订后重新批准。未通过项没有被标记为已验证。');
+  if (v.kind === 'blocker') lines.push('代码和预览已保留；请选择修复或修订验收条件。');
   return lines.join('\n').slice(0, 3500);
 }
 
-/** 完成摘要:基于实际结果区分 已实现 / 已验证 / 未验证。 */
+/** Public summary omits raw evidence; the persisted verification report retains it. */
 export function composeSummary(agentSummary, v) {
-  const verified = v?.items?.filter((i) => i.status === 'verified') || [];
-  const unverified = v?.items?.filter((i) => i.status !== 'verified') || [];
-  return [
-    `已实现(代理说明):${agentSummary}`,
-    `已验证(浏览器实际执行):${verified.length ? verified.map((i) => `${i.id} ${i.expect}`).join(';') : '仅基础检查'}`,
-    `未验证:${unverified.length ? unverified.map((i) => `${i.id} ${i.action}(${({ warning: '有警告', inconclusive: '证据不足', missing_config: '缺少外部服务配置', unverifiable: '无法验证', blocker: '核心故障' })[i.status] || '未通过'}${i.reason ? ': ' + i.reason.slice(0, 100) : ''})`).join(';') : '无'}`,
-  ].join('\n');
+  const verified = v?.items?.filter(i => i.status === 'verified') || [];
+  const unverified = v?.items?.filter(i => i.status !== 'verified') || [];
+  const lines = ['应用已生成并可以预览。', '已实现(代理说明):' + agentSummary,
+    '已验证(浏览器实际执行):' + (verified.length ? verified.map(i => i.id + ' ' + i.expect).join(';') : '仅基础检查'),
+    '未验证:' + (unverified.length ? unverified.map(i => i.id + ' ' + i.action + '(' +
+      ({ warning: '有警告', inconclusive: '证据不足', missing_config: '缺少外部服务配置', unverifiable: '无法验证', blocker: '阻断问题' })[i.status] + ')').join(';') : '无')];
+  if (unverified.length) lines.push('自动验收发现非阻塞警告，你仍可以打开预览继续测试。');
+  return lines.join('\n');
 }

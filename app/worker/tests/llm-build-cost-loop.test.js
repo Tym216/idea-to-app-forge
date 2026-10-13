@@ -8,6 +8,8 @@ import { chat } from '../src/llm.js';
 import { withExecutionControl } from '../src/execution-control.js';
 import { sourceManifest } from '../src/managed-source.js';
 import { shellQuote } from '../src/workspace.js';
+import { SCAFFOLD_FILES } from '../src/scaffold.js';
+import { buildFingerprint } from '../src/managed-source.js';
 import { extractMemories } from '../src/memory.js';
 
 const profile={
@@ -38,7 +40,7 @@ const passed={base:{blocking:[],warnings:[]},checks:[{id:'A1',status:'pass'}],sc
  * executeTask, runBuild, tool pipeline, common chat, memory and completion call stay real.
  * No source on disk is rewritten, and no SDK/DB/provider operation can escape the mocks.
  */
-async function fixture({pathological=false, verification=passed, budget='0.10'}={}) {
+async function fixture({pathological=false, verification=passed, budget='0.10',validationResume=false}={}) {
  const prior={...config},oldFetch=globalThis.fetch,oldLogger={...logger};
  Object.assign(config,profile,{llmMaxTheoreticalCostUsdPerExecution:budget});
  const logs=[],files=new Map(),operations=[],events=[];
@@ -50,6 +52,12 @@ async function fixture({pathological=false, verification=passed, budget='0.10'}=
  const plan={id:task.plan_id,project_id:task.project_id,version:1,kind:'plan',status:'approved',
   content:{understanding:'Customer records',scope:['records'],flows:['open records'],rules:['preserve data'],
    storage:'localStorage',steps:['implement'],design:'simple',acceptance,questions:[]}};
+ if(validationResume) {
+  task.kind='resume';
+  plan.content.acceptance=[{...acceptance[0],severity:'core',steps:[{op:'click',selector:'#toggle'},...acceptance[0].steps]}];
+  for(const [path,content] of Object.entries(SCAFFOLD_FILES)) files.set(path,content);
+  files.set('src/App.tsx','export default function App(){return <main>records</main>}');
+ }
  let workspace,posts=0,decisions=0,memories=0,checkpoints=0;
  const sb={
   workdir:'/offline',
@@ -61,6 +69,7 @@ async function fixture({pathological=false, verification=passed, budget='0.10'}=
    operations.push(command);
    let stdout='';
    if(command.startsWith('node -e '))stdout=JSON.stringify({nodeVersion:'offline',platform:'linux',arch:'x64',environmentHash:'fixture'});
+   if(command.startsWith('curl '))stdout='200';
    if(command==='npm --version')stdout='10.0.0';
    if(command.startsWith('printf %s'))stdout='/offline';
    if(command.includes('echo READY'))stdout='READY';
@@ -72,7 +81,18 @@ async function fixture({pathological=false, verification=passed, budget='0.10'}=
   async previewUrl(){return 'https://offline.invalid/preview';},
  };
  class OfflineWorkspace {
-  constructor(){workspace=this;this.state={revision:0,state:'confirmed',writer:null};this.gateway={};this.manifest=sourceManifest([]);}
+  constructor(){workspace=this;this.state={revision:0,state:'confirmed',writer:null};this.gateway={};this.manifest=sourceManifest([...files].map(([path,content])=>({path,content})));
+   if(validationResume) {
+    this.state.revision=1;
+    this.state.build={revision:1,workspace_revision:1,code_hash:this.manifest.code_hash,status:'passed',
+     basis:buildFingerprint({nodeVersion:'offline',platform:'linux',arch:'x64',environmentHash:'fixture',npmVersion:'10.0.0',
+      command:'npm run --ignore-scripts build',installCommand:'npm install --no-audit --no-fund --ignore-scripts --package-lock=true'})};
+    this.state.verify={revision:1,workspace_revision:1,code_hash:this.manifest.code_hash,status:'blocker',basis:'legacy-runner',
+     result:{kind:'blocker',base:{blocking:[],warnings:[],placeholder:false,chars:40,visible:12},
+      items:[{...plan.content.acceptance[0],status:'blocker',reason:'locator.click: Timeout 5000ms exceeded',
+       stepResults:[{index:1,op:'click',ok:false}]}]}};
+   }
+  }
   async read(){return this.state;}
   async initialize(){}
   async assertCurrent(rev){assert.equal(rev,this.state.revision);}
@@ -92,7 +112,7 @@ async function fixture({pathological=false, verification=passed, budget='0.10'}=
   async call(name,args){
    assert.equal(name,'ita_complete_build_checkpoint');
    assert.ok(this.valid('build',args.p_build_basis));assert.equal(this.state.build.status,'passed');
-   assert.ok(this.valid('verify',args.p_verify_basis));assert.equal(this.state.verify.status,'passed');
+   assert.ok(this.valid('verify',args.p_verify_basis));assert.ok(['passed','success_with_warnings','inconclusive'].includes(this.state.verify.status));
    assert.equal(args.p_revision,this.state.revision);assert.equal(args.p_hash,this.manifest.code_hash);
    events.push('checkpoint');checkpoints++;return {completed:true};
   }
@@ -191,4 +211,17 @@ test('actual terminal blocker/tool_error path cannot checkpoint or spend Memory 
   const f=await fixture({verification});assert.ok(['VERIFY_TOOL_ERROR','VERIFY_FAILED'].includes(f.error?.code));
   assert.equal(f.checkpoints,0);assert.equal(f.memories,0);assert.equal(f.posts,1);
  }
+});
+
+test('automation-only resume reuses valid build, performs fixed verification and checkpoints with zero LLM/source writes',async()=>{
+ const f=await fixture({validationResume:true,verification:{
+  base:{blocking:[],warnings:[],placeholder:false,chars:40,visible:12},
+  checks:[{id:'A1',status:'fail',reason:'locator.click: Timeout 5000ms exceeded',
+   stepResults:[{index:1,op:'click',ok:false,failureType:'automation_error'}]}],screenshots:[],
+ }});
+ assert.ifError(f.error);assert.equal(f.result.completed,true);
+ assert.equal(f.posts,0);assert.equal(f.decisions,0);assert.equal(f.memories,0);assert.equal(f.checkpoints,1);
+ assert.equal(f.workspace.state.revision,1);assert.equal(f.workspace.state.verify.status,'success_with_warnings');
+ assert.ok(!f.events.includes('memory'));assert.ok(!f.operations.includes('start_dev'));
+ assert.ok(!f.operations.some(op=>op.startsWith('npm run')||op.startsWith('npm install')));
 });

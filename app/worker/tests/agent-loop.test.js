@@ -25,7 +25,7 @@ function fakeSandbox({ buildExit = 0 } = {}) {
     workdir: '/w',
     async exec(_id, cmd) {
       calls.push(cmd);
-      return { exitCode: cmd === BUILD_CMD ? buildExit : 0, stdout: '', stderr: '' };
+      return { exitCode: cmd === BUILD_CMD ? buildExit : 0, stdout: cmd.startsWith('curl ') ? '200' : '', stderr: '' };
     },
     async checkProcess() { return false; },
     async listFiles() { return ['package.json', 'src/App.tsx']; },
@@ -131,7 +131,8 @@ test('门槛:未构建拒绝 start_dev 与 finish;构建+预览后 finish 成功
   assert.match(finishedSteps(deps)[3].observation, /尚未启动开发服务器/);
   assert.match(finishedSteps(deps)[5].observation, /尚未取得浏览器验收结果/);
   assert.ok(sandbox.calls.includes('npm install --no-audit --no-fund --ignore-scripts --package-lock=true && npm run build'));
-  assert.ok(sandbox.calls.includes(`bg:${DEV_CMD}`));
+  assert.ok(!sandbox.calls.includes(`bg:${DEV_CMD}`)); // Healthy existing preview is preserved.
+  assert.ok(sandbox.calls.some(c=>c.startsWith('curl ')));
 });
 
 test('文件工具在执行前记录真实路径和开始事件，完成后记录结果', async () => {

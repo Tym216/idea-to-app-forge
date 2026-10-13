@@ -24,7 +24,7 @@ function setup(actions, { buildExit = 0, verification = passed } = {}) {
     async readFile(_s, path) { if (!files.has(path)) throw new Error('file not found'); return files.get(path); },
     async writeFile(_s, path, content) { calls.push(`write:${path}`); files.set(path, content); },
     async listFiles() { return [...files.keys()]; },
-    async exec(_s, command) { calls.push(command); return { exitCode: command === BUILD_CMD ? buildExit : 0, stdout: '', stderr: '' }; },
+    async exec(_s, command) { calls.push(command); return { exitCode: command === BUILD_CMD ? buildExit : 0, stdout: command.startsWith('curl ') ? '200' : '', stderr: '' }; },
     async checkProcess() { return false; },
     async startBackground() { calls.push('start'); return { commandId: 'c' }; },
     async isPortListening() { return true; }, async readLogs() { return ''; },
@@ -106,7 +106,8 @@ test('build failure never starts preview; browser failure stops without another 
     const failedVerify = setup([action], { verification: { ...passed, checks: [{ id: 'A1', status: 'fail', reason: '缺少内容' }], base: { blocking: ['页面异常: 核心流程崩溃'], warnings: [] } } });
     await assert.rejects(failedVerify.run(), { code: 'VERIFY_FAILED' });
     assert.equal(failedVerify.modelCalls(), 1);
-    assert.ok(failedVerify.calls.includes('start'));
+    assert.ok(!failedVerify.calls.includes('start')); // Keep healthy Vite running even if interaction validation fails.
+    assert.ok(failedVerify.calls.some(c=>c.startsWith('curl ')));
     assert.equal(failedVerify.task.plan.find((stage) => stage.key === 'build').status, 'done');
     assert.equal(failedVerify.task.plan.find((stage) => stage.key === 'edit').status, 'done');
     assert.equal(failedVerify.task.plan.find((stage) => stage.key === 'verify').status, 'failed');

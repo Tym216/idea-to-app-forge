@@ -1,3 +1,4 @@
+import { verificationContinuationCandidate, assertVerificationContinuationBasis } from './verification-continuation.js';
 import { renderPersistenceHelper, PERSISTENCE_GUIDANCE } from './app-persistence.js';
 import { assertUserApplyExecution, executeUserApply, userApplyBasis } from './user-apply.js';
 import { validateRuntimeScript } from './workspace-policy.js';
@@ -286,14 +287,18 @@ async function runTool(ctx, tool, args) {
         }
       }
       const start = async () => {
-      await sandbox.exec(sandboxId, 'pkill -f "vite" || true', { timeoutMs: 20000 });
-      const { commandId } = await sandbox.startBackground(sandboxId, DEV_CMD);
-      let ready = false;
+      let commandId;
+      let ready = await sandbox.isPortListening(sandboxId, 5173);
+      if (ready) {
+        const http = await sandbox.exec(sandboxId, 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5173/', { timeoutMs: 10000 });
+        if (http.timedOut) throw sourceError('WORKSPACE_UNCERTAIN', '预览健康检查未确认结束');
+        if (!/^2\d\d$/.test(http.stdout.trim())) return { observation: '预览进程已运行，但 HTTP 不可用；保留进程与源码，未盲目重启。', ok: false };
+      } else ({ commandId } = await sandbox.startBackground(sandboxId, DEV_CMD));
       for (let i = 0; i < 20 && !ready; i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 3000));
         ready = await sandbox.isPortListening(sandboxId, 5173);
       }
-      const devLog = (await sandbox.readLogs(sandboxId, { commandId }).catch(() => '')).slice(-1500);
+      const devLog = commandId ? (await sandbox.readLogs(sandboxId, { commandId }).catch(() => '')).slice(-1500) : '';
       if (!ready) return { observation: `开发服务器 60 秒内未监听 5173 端口,日志:\n${devLog}`, ok: false };
       const previewUrl = await sandbox.previewUrl(sandboxId, 5173);
       if (!previewUrl) return { observation: '服务已启动但未取得预览地址。', ok: false };
@@ -705,6 +710,26 @@ export async function executeTask(task) {
     await workspace.initialize({ newSandbox: !ensured.alive });
     if (task.operation === 'user_apply') task.context_workspace_revision = workspace.state.revision;
   }
+  // Validation-only resume reuses existing lease/workspace/tool/completion contracts; no model path.
+  if (verificationContinuationCandidate(task, workspace)) {
+    const plan = await getPlan(task.plan_id, task.project_id);
+    const acceptance = validateAcceptance(plan.content.acceptance);
+    const buildBasis = buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId));
+    assertVerificationContinuationBasis(task, workspace, plan, acceptance, buildBasis);
+    const verifyBasis = verifyFingerprint(acceptance, { runnerHash: sha256(RUNNER_SOURCE), playwrightVersion: PLAYWRIGHT_VERSION, buildBasis });
+    const result = await runDeterministicValidation(task, sandbox, sandboxId, workspace,
+      { plan, acceptance, buildBasis, verifyBasis }, deps,
+      { summary: '继续固定验收，源码未修改。', stageNote: '继续已构建应用的固定验收；无模型调用' });
+    await workspace.runtime('checkpoint', async () => ({}));
+    if (buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId)) !== buildBasis)
+      throw sourceError('WORKSPACE_EVIDENCE_STALE', '固定验收续接期间构建环境发生变化');
+    const checkpoint = await workspace.call('ita_complete_build_checkpoint', {
+      p_key: task.id + ':checkpoint', p_revision: workspace.state.revision, p_hash: workspace.manifest.code_hash,
+      p_build_basis: buildBasis, p_verify_basis: verifyBasis, p_basis_id: plan.id,
+      p_summary: result.summary, p_preview_url: result.previewUrl,
+    });
+    return { ...result, completed: checkpoint.completed };
+  }
   if (task.operation === 'user_apply') {
     const project = await getProject(task.project_id, task.user_id);
     return executeUserApply({ task, workspace, loadChange: () => getRequestedChangeSet(task),
@@ -802,9 +827,9 @@ export async function buildRuntimeBasis(sandbox, sandboxId) {
 }
 
 /** Deterministic edit validation reuses the actual Worker tool pipeline; no ReAct or model calls. */
-export async function runDeterministicValidation(task, sandbox, sandboxId, workspace, basis, deps) {
+export async function runDeterministicValidation(task, sandbox, sandboxId, workspace, basis, deps, { summary = '已应用用户提交的文件修改。', stageNote = '已确认用户提交；无模型调用' } = {}) {
   task.plan = initialStages();
-  for (const stage of task.plan.filter(s=>['understand','read','edit'].includes(s.key))) {stage.status='done';stage.note='已确认用户提交；无模型调用';}
+  for (const stage of task.plan.filter(s=>['understand','read','edit'].includes(s.key))) {stage.status='done';stage.note=stageNote;}
   const progress = new BuildProgress({ maxFixRounds: config.maxFixRounds, fixRounds: task.fix_rounds || 0 });
   const ctx = { task, sandbox, sandboxId, workspace, progress, deps, acceptance: basis.acceptance,
     buildBasis: basis.buildBasis, verifyBasis: basis.verifyBasis, contextRevision: workspace.state.revision,
@@ -816,7 +841,7 @@ export async function runDeterministicValidation(task, sandbox, sandboxId, works
   }
   const blocked = progress.canFinish();
   if (blocked) throw new AgentStopError('USER_APPLY_VALIDATION_FAILED', blocked);
-  return { summary: composeSummary('已应用用户提交的文件修改。', ctx.verificationResult).replace('已实现(代理说明):','已应用:'),
+  return { summary: composeSummary(summary, ctx.verificationResult).replace('已实现(代理说明):','已应用:'),
     previewUrl: ctx.previewUrl, verificationKind: ctx.verificationResult.kind };
 }
 

@@ -143,22 +143,16 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
         </ol>
       )}
 
-      {(completedWithWarnings || (current.status === 'failed' && issues.length > 0)) && (
+      {(completedWithWarnings || (current.status==='failed'&&issues.length>0)) && (
         <div role="status" className="rounded-[8px] border border-[var(--line)] p-3 space-y-2 text-[12px]">
-          <p className="font-medium">{completedWithWarnings ? '预览已保留。以下条件未被验证通过；这不代表它们已实现。' : '验收发现明确故障，以下是失败证据。'}</p>
-          <ul className="space-y-2">{issues.map((issue) => (
-            <li key={issue.id} className="border-l-2 border-[var(--accent)] pl-2">
-              <span className="font-medium">{issue.id} · {issue.status === 'blocker' ? '核心故障' : issue.status === 'warning' ? '警告' : '证据不足'}</span>
-              {issue.reason && <p className="whitespace-pre-wrap">{issue.reason}</p>}
-              {issue.stepResults?.filter((step) => !step.ok).map((step) => (
-                <div key={step.index} className="mt-1">
-                  <p>步骤 {step.index} {step.op} · 预期：{String(step.expected ?? '—')} · 结果：{String(step.actual ?? '未知')}</p>
-                  {step.observed && <pre className="mt-1 overflow-auto whitespace-pre-wrap text-[11px]">{JSON.stringify(step.observed, null, 2)}</pre>}
-                </div>
-              ))}
-            </li>
-          ))}</ul>
-          <p className="text-[var(--text-2)]">{completedWithWarnings ? '可以继续使用当前预览；要修复请提交新的 Build 需求，要调整验收定义请切换 Plan 并审阅新版本。' : '代码与预览已保留。可主动恢复或提交修复任务；验收定义有误时请切换 Plan 修订。'}</p>
+          <p className="font-medium">{completedWithWarnings
+            ? '应用已生成并可以预览。自动验收发现非阻塞警告，你仍可以打开预览继续测试。'
+            : '自动验收未完成，代码和预览已保留；详细证据可在开发者诊断中查看。'}</p>
+          <p className="text-[var(--text-2)]">未验证项没有被标记为通过。</p>
+          <details>
+            <summary className="cursor-pointer text-[var(--text-2)]">开发者诊断 · 浏览器验收</summary>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(issues,null,2)}</pre>
+          </details>
         </div>
       )}
 

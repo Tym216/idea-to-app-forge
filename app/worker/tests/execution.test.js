@@ -62,7 +62,7 @@ test('恢复后预算已重置:历史累计 40 步/6 轮的任务仍能 build �
   };
   const sandbox = {
     workdir: '/w',
-    async exec(_id, cmd) { return { exitCode: 0, stdout: cmd === BUILD_CMD ? 'built' : '', stderr: '' }; },
+    async exec(_id, cmd) { return { exitCode: 0, stdout: cmd === BUILD_CMD ? 'built' : cmd.startsWith('curl ') ? '200' : '', stderr: '' }; },
     async checkProcess() { return false; },
     async listFiles() { return ['package.json']; },
     async readFile() { return '{}'; },
