@@ -14,8 +14,8 @@ const EMPTY_TEXT: Record<ViewState, { icon: typeof Monitor; title: string; body:
 };
 
 /** 真实预览:iframe 指向 Daytona 沙箱预览地址;无地址时按任务状态给出说明。 */
-export function PreviewPane({ label, url, state = 'empty', recovery, recoveryError, recoveryPending, onRecover }: {
-  label?:string; url: string | null; state?: ViewState; recovery?: PreviewRecovery | null; recoveryError?: string;
+export function PreviewPane({ label, url, checkingWorkspace, state = 'empty', recovery, recoveryError, recoveryPending, onRecover }: {
+  label?:string; checkingWorkspace?:boolean; url: string | null; state?: ViewState; recovery?: PreviewRecovery | null; recoveryError?: string;
   recoveryPending?: boolean; onRecover?: () => void;
 }) {
   const [nonce, setNonce] = useState(0);
@@ -27,8 +27,8 @@ export function PreviewPane({ label, url, state = 'empty', recovery, recoveryErr
     <div className="h-full grid place-items-center p-6" role="status">
       <div className="text-center max-w-[420px]">
         {problem ? <AlertTriangle className="h-6 w-6 mx-auto" /> : <Loader2 className="h-6 w-6 mx-auto animate-spin" />}
-        <p className="mt-2 font-medium">{problem ? '预览暂不可用' : '正在启动预览…'}</p>
-        <p className="mt-2 text-[13px] text-[var(--text-2)]">{problem || '正在等待 Worker 恢复已有应用，不调用模型。Worker 离线时会保持等待；应用和源码仍已保存。'}</p>
+        <p className="mt-2 font-medium">{problem ? '工作区暂时无法确认' : checkingWorkspace ? '正在确认工作区状态…' : '正在启动预览…'}</p>
+        <p className="mt-2 text-[13px] text-[var(--text-2)]">{problem ? '代码与草稿已保留。详细原因可在开发者诊断中查看。' : '正在等待 Worker 恢复已有应用，不调用模型。Worker 离线时会保持等待；应用和源码仍已保存。'}</p>
         {problem && onRecover && <button type="button" onClick={onRecover} disabled={!!recoveryPending} className="btn-ghost mt-3 px-3 py-2">重新检查预览</button>}
       </div>
     </div>

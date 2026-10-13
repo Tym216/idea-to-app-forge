@@ -1,3 +1,5 @@
+import {ConversationTimeline} from './ConversationTimeline';
+import {getAppVersion} from '@/lib/data';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Code2, Download, FileText, Monitor, PanelLeftClose, PanelLeftOpen, Send } from 'lucide-react';
 import { activeTask, defaultMode, stableWorkspace, readyPreview } from '@/lib/workspaceState';
@@ -41,6 +43,9 @@ type Props = {
   recoveryError?: string;
   recoveryPending?: boolean;
   onRecoverPreview?: () => void;
+  viewingVersionId?:string|null;
+  onViewingVersion?:(id:string|null)=>void;
+  checkingWorkspace?:boolean;
 };
 
 const TABS: { key: Tab; label: string; icon: typeof FileText }[] = [
@@ -63,7 +68,19 @@ export function WorkspaceView(props: Props) {
   const [modeChoice,setModeChoice]=useState<Mode|null>(null);
   const mode=modeChoice ?? defaultMode(project);
   const versions=props.versions ?? [];
+  const deletablePaths=messages.flatMap(m=>Array.isArray(m.meta?.createdFiles)?m.meta.createdFiles.filter((p):p is string=>typeof p==='string'):[]);
   const workingDraft=!stableWorkspace(project,versions.find(v=>v.id===project?.checkpoint_id)) || activeTask(tasks);
+  const [viewed,setViewed]=useState<AppVersion|null>(null);
+  const [versionError,setVersionError]=useState('');
+  const versionRequest=useRef(0);
+  const viewVersion=async(id:string|null)=>{
+    const n=++versionRequest.current;
+    if(!id||id===project?.checkpoint_id){setViewed(null);setVersionError('');props.onViewingVersion?.(null);pick('code');return;}
+    try {const v=await getAppVersion(id);if(v.project_id!==project?.id)throw Error('版本不属于当前项目');
+     if(n===versionRequest.current){setViewed(v);setVersionError('');props.onViewingVersion?.(id);pick('code');}
+    }catch{if(n===versionRequest.current)setVersionError('版本源码暂时无法读取，请稍后重试。');}
+  };
+  useEffect(()=>{const id=props.viewingVersionId;if(id&&id!==project?.checkpoint_id&&project)void viewVersion(id);},[props.viewingVersionId,project?.id,project?.checkpoint_id]);
   const [prompt, setPrompt] = useState('');
   const [sending, setSending] = useState(false);
   const [sideOpen, setSideOpen] = useState(true);
@@ -131,31 +148,13 @@ export function WorkspaceView(props: Props) {
         {sideOpen && (
           <aside className="lg:w-[380px] shrink-0 flex flex-col min-h-0 max-h-[55dvh] lg:max-h-none border-b lg:border-b-0 lg:border-r border-[var(--line)] bg-[var(--panel)]">
             <div className="flex-1 min-h-0 overflow-auto">
-              <TaskPanel current={current} history={history} onChanged={onChanged} retry={actions.retry} />
-              <div className="px-4 pb-3 space-y-2 border-t border-[var(--line)] pt-3" aria-label="对话">
-                {messages.length === 0 && <p className="text-[12px] text-[var(--text-2)]">还没有对话。</p>}
-                {messages.map((m) => {
-                  const round = tasks.find((t) => t.id === m.task_id)?.round;
-                  const isErr = Boolean((m.meta as { error?: boolean })?.error);
-                  return (
-                    <div
-                      key={m.id}
-                      className={
-                        m.role === 'user'
-                          ? 'rounded-[8px] bg-[var(--bg)] px-3 py-2 text-[13px] leading-[20px] whitespace-pre-wrap'
-                          : `border-l-2 ${isErr ? 'border-[var(--danger)]' : 'border-[var(--line)]'} pl-3 text-[13px] leading-[20px] whitespace-pre-wrap`
-                      }
-                    >
-                      {round && m.task_id !== current?.id && (
-                        <span className="block text-[11px] text-[var(--text-2)]">第 {round} 轮{isErr ? ' · 历史失败' : ''}</span>
-                      )}
-                      {typeof m.meta?.versionNumber === 'number' && <span className="block font-medium">App v{m.meta.versionNumber} 已生成</span>}
-                      {m.content}
-                    </div>
-                  );
-                })}
-                <div ref={bottomRef} />
-              </div>
+              {props.checkingWorkspace&&<p role="status" className="p-3 text-sm">正在确认工作区状态…</p>}
+              <ConversationTimeline messages={messages} tasks={tasks} versions={versions} currentId={project?.checkpoint_id}
+                onVersion={id=>void viewVersion(id)} onChanged={onChanged}/>
+              <details className="px-4 pb-3"><summary>开发者诊断与任务详情</summary>
+               <TaskPanel current={current} history={history} onChanged={onChanged} retry={actions.retry}/>
+              </details>
+              <div ref={bottomRef}/>
               {memory}
             </div>
 
@@ -229,14 +228,20 @@ export function WorkspaceView(props: Props) {
           </div>
           <div className="flex-1 min-h-0 bg-[var(--panel)]">
             {tab === 'plan' && <PlanPanel plans={plans} feedback={feedback} busy={busy} onChanged={onChanged} actions={actions} />}
-            {tab === 'preview' && <PreviewPane label={workingDraft ? 'Working Workspace · 正在处理或有未发布修改' : 'Working Workspace · 检查时对应 App v'+versions.find(v=>v.id===project?.checkpoint_id)?.version_number} url={props.previewUrl!==undefined ? props.previewUrl : readyPreview(project,props.recovery) ? props.recovery?.preview_url ?? null : null} state={state}
+            {tab === 'preview' && <PreviewPane checkingWorkspace={props.checkingWorkspace} label={workingDraft ? 'Working Workspace · 正在处理或有未发布修改' : 'Working Workspace · 检查时对应 App v'+versions.find(v=>v.id===project?.checkpoint_id)?.version_number} url={props.previewUrl!==undefined ? props.previewUrl : readyPreview(project,props.recovery) ? props.recovery?.preview_url ?? null : null} state={state}
               recovery={props.recovery?.sandbox_id === project?.sandbox_id && props.recovery?.project_id === project?.id ? props.recovery : null}
               recoveryError={props.recoveryError} recoveryPending={props.recoveryPending} onRecover={props.onRecoverPreview} />}
-            <div className={tab==='code' ? 'h-full' : 'hidden'}><CodeExplorer files={files} readonly={!props.onApply}
+            {versionError&&<p role="alert">{versionError}</p>}
+            {tab==='code'&&<div className="p-2 text-xs border-b"> {viewed?'Version '+viewed.version_number+' · 历史源码只读':'Current · Version '+(versions.find(v=>v.id===project?.checkpoint_id)?.version_number??'—')+(workingDraft?' · 有未发布修改':'')}
+              {viewed&&<button className="ml-3" onClick={()=>void viewVersion(null)}>查看 Current</button>}
+            </div>}
+            <div className={tab==='code'&&!viewed ? 'h-full' : 'hidden'}><CodeExplorer projectId={project?.id} deletablePaths={deletablePaths} files={files} readonly={!props.onApply}
               revision={project?.workspace_revision ?? 0} task={current ?? undefined}
               blocked={activeTask(tasks) || project?.workspace_state!=='confirmed' || !!project?.workspace_writer || !!props.recoveryPending || ['queued','running'].includes(props.recovery?.status ?? '')}
               onApply={props.onApply}/></div>
-            {tab === 'versions' && <VersionsPanel versions={versions} currentId={project?.checkpoint_id} workingDraft={workingDraft}/>}
+            {tab==='code'&&viewed&&<CodeExplorer key={viewed.id} readonly files={viewed.files.map(f=>({...f,id:f.path,project_id:viewed.project_id,updated_at:viewed.created_at}))}/>}
+            {tab==='preview'&&viewed&&<p className="p-2 text-xs">历史源码已选中；预览仍是当前工作区。历史运行预览暂不支持。</p>}
+            {tab === 'versions' && <VersionsPanel versions={versions} currentId={project?.checkpoint_id} workingDraft={workingDraft} onSelect={id=>void viewVersion(id)}/>}
           </div>
         </main>
       </div>

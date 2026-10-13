@@ -8,7 +8,8 @@
     "preview": "vite preview",
     "postinstall": "echo 'Dependencies installed successfully'",
     "test:demo": "node --test tests/environment.test.mjs",
-    "test:ui": "node tests/demo-ui.mjs && node tests/stable-preview-ui.mjs"
+    "test:ui": "node tests/demo-ui.mjs && node tests/stable-preview-ui.mjs",
+    "test:product": "node tests/product-ui.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",

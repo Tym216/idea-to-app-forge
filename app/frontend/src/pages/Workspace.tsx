@@ -37,6 +37,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   const [feedback, setFeedback] = useState<PlanFeedback[]>([]);
   const [error, setError] = useState('');
   const autoSubmitted = useRef(false);
+  const checkedWriters=useRef(new Set<string>());
   const recoveryRequest=useRef<Promise<void>|null>(null);
   const readFailures=useRef(0);
   const [recovery, setRecovery] = useState<PreviewRecovery | null>(null);
@@ -94,6 +95,14 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
     return () => clearInterval(timer);
   }, [refresh]);
 
+  const checkingWorkspace=Boolean(project?.workspace_writer&&!tasks.some(t=>['queued','running','paused'].includes(t.status)));
+  useEffect(()=>{
+    if(!checkingWorkspace||!project||['queued','running'].includes(recovery?.status??''))return;
+    const writer=project.workspace_writer as {token?:string};
+    if(writer.token&&!checkedWriters.current.has(writer.token)){
+      checkedWriters.current.add(writer.token);void recoverPreview();
+    }
+  },[checkingWorkspace,project,recovery?.status,recoverPreview]);
   const previewIdentity=savedPreviewIdentity(project,tasks,files.length>0);
   const currentRecovery=recovery?.sandbox_id===project?.sandbox_id&&recovery?.project_id===project?.id?recovery:null;
   const previewHealthy=usePreviewEntry({identity:previewIdentity,url:project?.preview_url??null,
@@ -142,6 +151,9 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
       key={projectId}
       project={project}
       versions={versions}
+      checkingWorkspace={checkingWorkspace}
+      viewingVersionId={searchParams.get('version')}
+      onViewingVersion={id=>{const next=new URLSearchParams(searchParams);if(id)next.set('version',id);else next.delete('version');setSearchParams(next,{replace:true});}}
       onApply={async(input)=>{const receipt=await submitUserApply(projectId,input);await refresh();return receipt;}}
       messages={messages}
       files={files}

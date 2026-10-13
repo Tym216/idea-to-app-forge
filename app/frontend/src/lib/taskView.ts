@@ -10,7 +10,10 @@ export function parseTaskError(error: string | null): ParsedError | null {
   try {
     const v = JSON.parse(error);
     if (v && typeof v.reason === 'string') {
-      return { code: v.code || 'ERROR', reason: v.reason, next: v.next || '', lastTool: v.lastTool ?? null, raw: v.raw || '' };
+      const busy=v.code==='LLM_PROVIDER_BUSY'||(v.code==='LLM_HTTP'&&/\b429\b/.test(v.reason));
+      const reason=busy?(v.code==='LLM_PROVIDER_BUSY'?v.reason:'模型服务暂时繁忙，可以稍后继续重试；项目与代码已保留。'):
+       String(v.code||'').startsWith('WORKSPACE_')?'工作区状态尚未确认，系统正在核对；现有代码已保留。':v.reason;
+      return { code: busy?'LLM_PROVIDER_BUSY':v.code || 'ERROR', reason, next: v.next || '', lastTool: v.lastTool ?? null, raw: v.raw || '' };
     }
   } catch {
     /* 纯文本 */

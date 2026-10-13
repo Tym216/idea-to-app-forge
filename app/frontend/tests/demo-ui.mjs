@@ -52,8 +52,8 @@ try {
  await page.getByRole('alert').filter({hasText:'Workspace changed'}).waitFor();
  assert.equal(await page.getByTestId('default-mode').textContent(),'build');assert.equal(await page.getByTestId('stable').textContent(),'false');
  assert.equal(await page.getByTestId('old-preview').textContent(),'false');assert.equal(await page.locator('iframe').count(),0);
- await page.getByRole('button',{name:'App v1 · Current · Initial'}).click();await page.getByText('historical',{exact:true}).waitFor();
- assert.equal(await page.getByRole('textbox').count(),1); // Historical code is pre, never a second editor.
+ await page.getByRole('button',{name:'App v1 · Current · Initial app'}).click();await page.getByText('historical',{exact:true}).waitFor();
+ assert.equal(await page.getByRole('textbox').count(),2); // Historical code is pre, never a second editor.
  await page.getByText('历史源码只读。',{exact:false}).waitFor();
  // Real browser reload persistence, using the generated helper, on the same local origin.
  const helper=renderPersistenceHelper('atoms-demo','project');

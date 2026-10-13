@@ -316,6 +316,7 @@ try {
   readFile:async(_id,p)=>fs.readFile(path.join(dir,p),'utf8'),
   listFiles:async()=> (await ws.gateway.scan()).files.map(f=>f.path),
   exec:async(_id,cmd)=>{
+   if(cmd.startsWith('curl '))return {exitCode:0,stdout:'200',stderr:''};
    if(cmd.startsWith('npm install')||cmd.startsWith('npm ci')) {try {await fs.access(path.join(dir,'package-lock.json'));} catch {await fs.writeFile(path.join(dir,'package-lock.json'),'{}');}return {exitCode:0,stdout:'',stderr:''};}
    if(cmd==='npm run --ignore-scripts build'||cmd.startsWith('pkill')) return {exitCode:0,stdout:'',stderr:''};
    try {const r=await execute('bash',['-lc',cmd],{cwd:dir,maxBuffer:32*1024*1024});return {exitCode:0,stdout:r.stdout,stderr:r.stderr};}
@@ -440,6 +441,60 @@ try {
  await fs.rm(path.join(path.dirname(dir),'.forge-workspace-'+sha256(dir).slice(0,24)),{recursive:true,force:true});
  await fs.rm(dir,{recursive:true,force:true});
 }
+
+
+await db.exec(readFileSync(new URL('../migrations/0010_product_editor.sql',import.meta.url),'utf8'));
+// Product editor: use real mutation/evidence/completion RPCs, never direct source DML.
+const productExec=randomUUID();
+const productId=(await db.query('insert into public.ita_projects(user_id,name) values($1,$2) returning id',[userId,'Product editor'])).rows[0].id;
+const productPlan=(await db.query("insert into public.ita_plans(project_id,user_id,version,kind,status,content) values($1,$2,1,'action','approved',$3) returning id",
+ [productId,userId,JSON.stringify({acceptance:[{id:'A1',action:'read',expect:'A',external:false,steps:[{op:'expectText',selector:'main',contains:'A'}]}]})])).rows[0].id;
+let productTask=(await db.query("insert into public.ita_tasks(project_id,user_id,mode,prompt,plan_id,plan_version) values($1,$2,'build','Initial',$3,1) returning id",[productId,userId,productPlan])).rows[0].id;
+let productScope=[productId,productTask,'w',productExec];
+await svc("update public.ita_tasks set status='running',worker_id='w',execution_id=$1,lease_until=now()+interval '1 hour' where id=$2",[productExec,productTask]);
+async function productCall(name,extra=[],types=[]){const ts=['uuid','uuid','text','uuid',...types];return (await svc('select to_jsonb(public.'+name+'('+ts.map((t,i)=>'$'+(i+1)+'::'+t).join(',')+')) r',[...productScope,...extra]))[0].r;}
+const initialFiles=[{path:'src/a.ts',content:'A'}],initialHash=hash(initialFiles);
+let productWriter=await productCall('ita_workspace_acquire',[randomUUID(),'materialize','product-sb',null],['uuid','text','text','uuid']);
+await productCall('ita_workspace_finish_operation',[productWriter.token,empty],['uuid','text']);
+const initialChange=await productCall('ita_workspace_prepare',['initial','agent',0,JSON.stringify([{operation:'write',path:'src/a.ts',content:'A'}]),initialHash],['text','text','bigint','jsonb','text']);
+productWriter=await productCall('ita_workspace_acquire',[randomUUID(),'mutation','product-sb',initialChange.id],['uuid','text','text','uuid']);
+await productCall('ita_workspace_commit',[productWriter.token,initialChange.id,JSON.stringify(initialFiles),initialHash],['uuid','uuid','jsonb','text']);
+async function publishProduct(key,revision,files){
+ const h=hash(files);
+ for(const [kind,basis,status]of [['build',b,'passed'],['verify',v,'success_with_warnings']])
+  await productCall('ita_workspace_evidence',[kind,JSON.stringify({workspace_revision:revision,code_hash:h,basis_fingerprint:basis,status,result:{warning:'fixed checks inconclusive'}})],['text','jsonb']);
+ return productCall('ita_complete_build_checkpoint',[key,revision,h,b,v,productPlan,'Completed edits','https://stable.test/'],['text','bigint','text','text','text','uuid','text','text']);
+}
+const productV1=await publishProduct('product-v1',1,initialFiles);
+const submitProduct=(key,rev,files)=>as('authenticated',userId,'select public.ita_submit_user_apply($1,$2,$3,$4) r',[productId,key,rev,JSON.stringify(files)]).then(rows=>rows[0].r);
+const created=await submitProduct('add-file',1,[{operation:'create',path:'src/note.ts',content:'export const note = 1;'}]);
+assert.equal((await submitProduct('add-file',1,[{operation:'create',path:'src/note.ts',content:'export const note = 1;'}])).task_id,created.task_id);
+await assert.rejects(submitProduct('add-file',1,[{operation:'create',path:'src/note.ts',content:'changed'}]),/REQUEST_CONFLICT/);
+async function applyProduct(receipt,files){
+ const e=randomUUID();productScope=[productId,receipt.task_id,'w',e];
+ await svc("update public.ita_tasks set status='running',worker_id='w',execution_id=$1,lease_until=now()+interval '1 hour' where id=$2",[e,receipt.task_id]);
+ const w=await productCall('ita_workspace_acquire',[randomUUID(),'mutation','product-sb',receipt.changeset_id],['uuid','text','text','uuid']);
+ return productCall('ita_workspace_commit',[w.token,receipt.changeset_id,JSON.stringify(files),hash(files)],['uuid','uuid','jsonb','text']);
+}
+const withNote=[...initialFiles,{path:'src/note.ts',content:'export const note = 1;'}];
+await applyProduct(created,withNote);
+const productV2=await publishProduct('product-v2',2,withNote);
+assert.equal(productV2.version_number,2);
+assert.equal((await svc('select parent_checkpoint_id,label from public.ita_snapshots where id=$1',[productV2.snapshot_id]))[0].parent_checkpoint_id,productV1.snapshot_id);
+assert.match((await svc('select label from public.ita_snapshots where id=$1',[productV2.snapshot_id]))[0].label,/新增 src\/note.ts/);
+const editMessage=(await svc("select * from public.ita_messages where task_id=$1 and role='user'",[created.task_id]))[0];
+assert.deepEqual(editMessage.meta.createdFiles,['src/note.ts']);
+const beforeProductNoop=(await svc("select (select count(*) from public.ita_tasks where project_id=$1) tasks,(select count(*) from public.ita_changesets where project_id=$1) changes,(select count(*) from public.ita_snapshots where project_id=$1) versions,(select count(*) from public.ita_messages where project_id=$1) messages",[productId]))[0];
+assert.deepEqual(await submitProduct('no-op',2,[{path:'src/a.ts',content:'A'}]),{accepted:true,noop:true});
+assert.deepEqual((await svc("select (select count(*) from public.ita_tasks where project_id=$1) tasks,(select count(*) from public.ita_changesets where project_id=$1) changes,(select count(*) from public.ita_snapshots where project_id=$1) versions,(select count(*) from public.ita_messages where project_id=$1) messages",[productId]))[0],beforeProductNoop);
+await assert.rejects(submitProduct('delete-agent-file',2,[{operation:'delete',path:'src/a.ts'}]),/DELETE_NOT_ALLOWED/);
+const deleted=await submitProduct('delete-user-file',2,[{operation:'delete',path:'src/note.ts'}]);
+await applyProduct(deleted,initialFiles);
+const productV3=await publishProduct('product-v3',3,initialFiles);
+assert.equal(productV3.version_number,3);
+assert.deepEqual((await svc('select files from public.ita_snapshots where id=$1',[productV2.snapshot_id]))[0].files.map(f=>({path:f.path,content:f.content})),withNote);
+await assertForgeTablePrivileges(db);
+console.log('PASS product editor SQL: controlled create/delete, protected source, idempotency, persisted user messages, no-op no side effects, immutable parent versions and titles; existing authority preserved');
 
 await db.close();
 console.log('PASS Demo SQL: numbered versions/legacy parent/immutable metadata/completion-key repeat/approval separation; User Apply ownership/active task+writer+preview/unresolved/idempotency/stale/input authority; preview revision receipt/cache invalidation (single-connection PGlite, not a dual-connection concurrency proof)');
