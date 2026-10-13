@@ -1,3 +1,4 @@
+import {userApplyPolicy,userApplyHealthFingerprint,userApplyHealthResult} from './user-apply-validation.js';
 import { savedPreviewHealthy } from './preview-recovery.js';
 import { verificationContinuationCandidate, assertVerificationContinuationBasis } from './verification-continuation.js';
 import { renderPersistenceHelper, PERSISTENCE_GUIDANCE } from './app-persistence.js';
@@ -5,7 +6,7 @@ import { assertUserApplyExecution, executeUserApply, userApplyBasis } from './us
 import { validateRuntimeScript } from './workspace-policy.js';
 import { config } from './config.js';
 import { Workspace, shellQuote } from './workspace.js';
-import { sourceManifest, buildFingerprint, verifyFingerprint, sha256, sourceError, normalizeSourcePath, isManagedPath } from './managed-source.js';
+import { sourceManifest, applySourceChanges, buildFingerprint, verifyFingerprint, sha256, sourceError, normalizeSourcePath, isManagedPath } from './managed-source.js';
 import { validateChanges } from './apply-changes.js';
 import { recordToolCall, recordOperation } from './task-metrics.js';
 import { assertExecutionActive, guardedSandbox, isSupabaseError, rethrowExecutionControl } from './execution-control.js';
@@ -16,7 +17,7 @@ import { SCAFFOLD_FILES } from './scaffold.js';
 import { loadMemories, renderMemories, extractMemories, upsertMemory } from './memory.js';
 import { AgentStopError, BuildProgress, mayModifyCode, verificationAttempts, requireVerificationBudget, requireNewRevisionForVerification, MAX_VERIFY_ATTEMPTS } from './build-progress.js';
 import { DESIGN_TOKENS_PATH, renderDesignPrompt, renderDesignTokensCss, resolveDesign, wantsDesignChange } from './design.js';
-import { checkSandboxDependencies } from './deps-check.js';
+import { findMissingDependencies, checkSandboxDependencies } from './deps-check.js';
 import { VERIFY_SPEC, RUNNER_SOURCE, PLAYWRIGHT_VERSION, validateChecks, runVerification, classifyResult, formatObservation, composeSummary } from './verify.js';
 import { withObservation, redact } from './telemetry.js';
 import {
@@ -26,6 +27,7 @@ import {
 import {
   admin,
   getRequestedChangeSet,
+  getCheckpointSource,
   addMessage,
   appendStep,
   getLatestPlanVersion,
@@ -244,13 +246,25 @@ async function runTool(ctx, tool, args) {
         progress.recordBuild(true);
         return { observation: '复用当前源码和构建依据的已成功证据，未重新构建。', ok: true, reused: true };
       }
-      const depsGate = await checkSandboxDependencies(sandbox, sandboxId);
+      const localDeps = ctx.userApplyPolicy ? findMissingDependencies(ctx.workspace.manifest.files.find(f=>f.path==='package.json')?.content||'',ctx.workspace.manifest.files) : null;
+      const depsGate = localDeps ? localDeps.error || (localDeps.missing.length ? '未声明依赖：'+localDeps.missing.map(m=>m.name).join(', '):'') : await checkSandboxDependencies(sandbox, sandboxId);
       if (depsGate) return { observation: depsGate, ok: false };
       let result;
       if (ctx.workspace) {
-        const installed = await ctx.workspace.runtime('install', () => runCommand(sandbox, sandboxId, INSTALL_CMD), { adoptLockfile: true });
-        ctx.contextRevision = ctx.workspace.state.revision;
-        if (installed.exitCode !== 0) return { observation: formatResult(installed), ok: false };
+        let installRequired = !ctx.userApplyPolicy || ctx.userApplyPolicy.install === 'REQUIRED';
+        if (!installRequired) {
+          const probe=await sandbox.exec(sandboxId,'test -x node_modules/.bin/vite',{timeoutMs:20000});
+          if(probe.timedOut)throw sourceError('WORKSPACE_UNCERTAIN','无法确认依赖状态，未盲目安装');
+          installRequired=probe.exitCode!==0;
+        }
+        if(ctx.userApplyPolicy)await ctx.deps.appendStep(task,{tool:'install',event:'finished',phase:'build',ok:true,
+          observation:installRequired?'依赖安装 REQUIRED':'依赖未变化，跳过安装 SKIPPED_UNCHANGED',
+          result:{status:installRequired?'REQUIRED':'SKIPPED_UNCHANGED',reason:ctx.userApplyPolicy.escalationReason|| (installRequired?'dependencies_missing':null)}});
+        if(installRequired){
+          const installed=await ctx.workspace.runtime('install',()=>runCommand(sandbox,sandboxId,INSTALL_CMD),{adoptLockfile:true});
+          ctx.contextRevision=ctx.workspace.state.revision;
+          if(installed.exitCode!==0)return {observation:formatResult(installed),ok:false};
+        }
         validateRuntimeScript(ctx.workspace.manifest, 'build');
         result = await ctx.workspace.runtime('build', () => runCommand(sandbox, sandboxId, 'npm run --ignore-scripts build'));
         await ctx.workspace.evidence('build', ctx.buildBasis, result.exitCode === 0 ? 'passed' : 'failed', { exitCode: result.exitCode });
@@ -308,7 +322,7 @@ async function runTool(ctx, tool, args) {
       ctx.previewUrl = previewUrl;
       await ctx.deps.updateProject(task.project_id, task.user_id, { preview_url: previewUrl, sandbox_id: sandboxId }, task.id);
       logger.info('preview.written', { taskId: task.id, projectId: task.project_id, sandboxId, previewUrl });
-      return { observation: `开发服务器已启动,预览地址: ${previewUrl}`, ok: true };
+      return { observation: ready && !commandId ? `复用健康开发服务器，Preview 已更新: ${previewUrl}` : `开发服务器已启动,预览地址: ${previewUrl}`, ok: true, result:{runtime:commandId?'started':'reused',previewUrl} };
       };
       const r = ctx.workspace ? await ctx.workspace.runtime('start', start) : await start();
       if (ctx.workspace?.valid('verify', ctx.verifyBasis) && ctx.workspace.state.verify.result) {
@@ -322,7 +336,8 @@ async function runTool(ctx, tool, args) {
       if (blocked) return { observation: blocked, ok: false };
       if (Object.keys(args).length) return { observation: 'verify 不接受检查参数;检查由已保存的计划版本固定。请用空 args 重试。', ok: false };
       const checks = ctx.acceptance.filter((a) => a.steps?.length).map(({ id, steps }) => ({ id, steps }));
-      const validated = validateChecks(ctx.acceptance, checks);
+      const healthOnly=ctx.verificationMode==='health';
+      const validated = healthOnly?{checks:[]}:validateChecks(ctx.acceptance, checks);
       if (ctx.workspace?.valid('verify', ctx.verifyBasis)) {
         const previous = ctx.workspace.state.verify;
         if (['passed', 'success_with_warnings', 'inconclusive'].includes(previous.status)) {
@@ -335,10 +350,10 @@ async function runTool(ctx, tool, args) {
       if (!ctx.workspace) requireNewRevisionForVerification(task);
       const attempt = verificationAttempts(task.steps) + 1;
       await ctx.deps.appendStep(task, { tool: 'verify_attempt', phase: 'verify', event: 'started',
-        observation: `第 ${attempt}/${MAX_VERIFY_ATTEMPTS} 次浏览器验收；失败后等待用户决定，不自动修复` });
+        observation: healthOnly?'快速编辑检查：HTTP、渲染与 runtime；不运行功能交互验收':`第 ${attempt}/${MAX_VERIFY_ATTEMPTS} 次浏览器验收；失败后等待用户决定，不自动修复`,result:{mode:healthOnly?'health':'full'} });
       const verify = () => (ctx.deps.verifyApp || runVerification)({ sandbox, sandboxId, checks: validated.checks });
       const raw = ctx.workspace ? await ctx.workspace.runtime('verify', verify) : await verify();
-      const result = classifyResult(raw, ctx.acceptance);
+      const result = healthOnly?userApplyHealthResult(raw,ctx.acceptance):classifyResult(raw, ctx.acceptance);
       if (ctx.workspace) await ctx.workspace.evidence('verify', ctx.verifyBasis, result.kind, result);
       ctx.verificationResult = result;
       progress.recordVerification(result);
@@ -585,7 +600,7 @@ async function executeOperation(ctx, tool, args, automatic) {
     }
     if (automatic) {
       await ctx.deps.appendStep(ctx.task, { tool, phase: tool, event: 'finished', automatic: true, ok: result.ok,
-        ms: Math.round(Math.max(0, performance.now() - started)), observation: result.observation.slice(0, 1500) });
+        ms: Math.round(Math.max(0, performance.now() - started)), observation: result.observation.slice(0, 1500), ...(result.result?{result:result.result}:{}) });
     }
     return result;
   } catch (error) {
@@ -748,10 +763,16 @@ export async function executeTask(task) {
         if (plan.id !== frozen.basis_id || plan.version !== task.plan_version) throw sourceError('WORKSPACE_BASIS_INVALID', 'Fixed regression basis changed');
         const acceptance = validateAcceptance(plan.content.acceptance);
         const buildBasis = buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId));
-        const verifyBasis = verifyFingerprint(acceptance, { runnerHash: sha256(RUNNER_SOURCE), playwrightVersion: PLAYWRIGHT_VERSION, buildBasis });
-        if (buildBasis !== frozen.build_basis || verifyBasis !== frozen.verify_basis)
+        const fullBasis = verifyFingerprint(acceptance, { runnerHash: sha256(RUNNER_SOURCE), playwrightVersion: PLAYWRIGHT_VERSION, buildBasis });
+        const healthBasis=userApplyHealthFingerprint(acceptance,buildBasis);
+        if (buildBasis !== frozen.build_basis || ![fullBasis,healthBasis].includes(frozen.verify_basis))
           throw sourceError('WORKSPACE_BASIS_INVALID', 'Stable validation basis is not compatible with this runtime; Apply stopped');
-        return { plan, acceptance, buildBasis, verifyBasis };
+        const snapshot=await getCheckpointSource(frozen.checkpoint_id,task.project_id);
+        const policy=userApplyPolicy(snapshot.files,workspace.manifest.files);
+        // Compare requested target too, before mutation; committed resumes use their actual current source.
+        const target=change.status==='committed'?workspace.manifest:applySourceChanges(workspace.manifest,change.changes);
+        Object.assign(policy,userApplyPolicy(snapshot.files,target.files));
+        return { plan, acceptance, buildBasis, verifyBasis:policy.mode==='health'?healthBasis:fullBasis, userApplyPolicy:policy };
       },
       validateAndComplete: async (basis) => {
         const result = await runDeterministicValidation(task, sandbox, sandboxId, workspace, basis, deps,
@@ -836,7 +857,7 @@ export async function runDeterministicValidation(task, sandbox, sandboxId, works
   const progress = new BuildProgress({ maxFixRounds: config.maxFixRounds, fixRounds: task.fix_rounds || 0 });
   const ctx = { task, sandbox, sandboxId, workspace, progress, deps, acceptance: basis.acceptance,
     buildBasis: basis.buildBasis, verifyBasis: basis.verifyBasis, contextRevision: workspace.state.revision,
-    existingPreviewUrl, previewUrl: '', verificationResult: null, fusionEnabled: false, runtimePolicy: { workflow: 'manual', afterBuildSuccess: [] } };
+    existingPreviewUrl, userApplyPolicy:basis.userApplyPolicy, verificationMode:basis.userApplyPolicy?.mode, previewUrl: '', verificationResult: null, fusionEnabled: false, runtimePolicy: { workflow: 'manual', afterBuildSuccess: [] } };
   if (task.tool_steps + 3 > config.maxToolSteps) throw new AgentStopError('TOOL_STEP_LIMIT', 'Validation budget exhausted; source preserved');
   for (const tool of ['build', 'start_dev', 'verify']) {
     const result = await executeOperation(ctx, tool, {}, true);

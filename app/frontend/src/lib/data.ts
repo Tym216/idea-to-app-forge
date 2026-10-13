@@ -298,7 +298,7 @@ export async function listTaskFeedback(taskId: string): Promise<TaskFeedback[]> 
 }
 
 export async function submitUserApply(projectId:string,input:EditSubmission):Promise<ApplyReceipt> {
- const {data,error}=await supabase.rpc('ita_submit_user_apply',{p_project_id:projectId,p_request_id:input.requestId,p_base_revision:input.baseRevision,p_files:input.files});
+ const {data,error}=await supabase.rpc('ita_submit_user_apply',{p_project_id:projectId,p_request_id:input.requestId,p_base_revision:input.baseRevision,p_files:input.files,p_intent:input.intent||null});
  if(error) {
   if(/REVISION_CONFLICT/.test(error.message)) throw new Error('Workspace changed. Reload and reapply your edit.');
   throw rpcError(error);

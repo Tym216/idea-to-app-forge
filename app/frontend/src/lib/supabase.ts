@@ -152,5 +152,5 @@ export type TaskFeedback = { id: string; task_id: string; execution_id: string |
 export type AppVersion = {
  id:string; project_id:string; version_number:number; parent_checkpoint_id:string|null;
  label:string; created_at:string; workspace_revision:number; code_hash:string; basis_id:string;
- verify_evidence: {status:string}; files?: {path:string;content:string}[];
+ verify_evidence: {status:string;result?:{validationMode?:string;featureChecksRun?:boolean}}; files?: {path:string;content:string}[];
 };

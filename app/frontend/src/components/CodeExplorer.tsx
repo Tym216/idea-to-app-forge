@@ -2,19 +2,19 @@ import {useEffect,useRef,useState} from 'react';
 import type {ProjectFile,Task} from '@/lib/supabase';
 import {parseTaskError} from '@/lib/taskView';
 export type ApplyReceipt={accepted:true;noop:true}|{accepted:true;task_id:string;changeset_id:string;noop?:false};
-export type EditSubmission={requestId:string;baseRevision:number;files:{path:string;operation?:'write'|'create'|'delete';content?:string}[]};
+export type EditSubmission={requestId:string;baseRevision:number;intent?:string;files:{path:string;operation?:'write'|'create'|'delete';content?:string}[]};
 type Props={files:ProjectFile[];readonly?:boolean;revision?:number;blocked?:boolean;task?:Task;projectId?:string;
  deletablePaths?:string[];onApply?:(input:EditSubmission)=>Promise<ApplyReceipt>};
 export function CodeExplorer({files,readonly=true,revision=0,blocked=false,task,projectId,deletablePaths=[],onApply}:Props){
  const key='forge-editor-draft:'+ (import.meta.env.VITE_EXPECTED_SUPABASE_PROJECT_REF||'local')+':'+ (projectId||files[0]?.project_id||'local');
  const [active,setActive]=useState(''),[drafts,setDrafts]=useState<Record<string,string|null>>({});
  const [base,setBase]=useState<number|null>(null),[submitting,setSubmitting]=useState(false),[accepted,setAccepted]=useState('');
- const [error,setError]=useState(''),[noop,setNoop]=useState(false),[saved,setSaved]=useState(false),[newPath,setNewPath]=useState('');
+ const [error,setError]=useState(''),[noop,setNoop]=useState(false),[saved,setSaved]=useState(false),[newPath,setNewPath]=useState(''),[intent,setIntent]=useState('');
  const submitted=useRef<Record<string,string|null>|null>(null);
  const request=useRef<{signature:string;id:string}>();
  useEffect(()=>{if(readonly)return;try{const data=JSON.parse(localStorage.getItem(key)||'null');
   if(data?.schema===1&&Number.isInteger(data.base)&&data.drafts&&Object.entries(data.drafts).every(([p,v])=>typeof p==='string'&&(typeof v==='string'||v===null))){
-   setDrafts(data.drafts);setBase(data.base);setActive(data.active||'');setSaved(true);
+   setDrafts(data.drafts);setBase(data.base);setActive(data.active||'');setIntent(typeof data.intent==='string'?data.intent:'');setSaved(true);
   }}catch{/* Bad local drafts never alter server files. */}},[key,readonly]);
  const visible=files.filter(f=>drafts[f.path]!==null).concat(Object.entries(drafts).filter(([p,c])=>c!==null&&!files.some(f=>f.path===p))
   .map(([path,content])=>({id:path,project_id:projectId||'',path,content:content!,updated_at:''})));
@@ -26,7 +26,7 @@ export function CodeExplorer({files,readonly=true,revision=0,blocked=false,task,
   const applied=submitted.current;
   if(result?.status!=='succeeded'||!applied||!Object.entries(applied).every(([p,c])=>c===null?!files.some(f=>f.path===p):files.find(f=>f.path===p)?.content===c))return;
   const remaining=Object.fromEntries(Object.entries(drafts).filter(([p,c])=>applied[p]!==c));
-  setDrafts(remaining);setSaved(false);if(!Object.keys(remaining).length){setBase(null);localStorage.removeItem(key);}
+  setDrafts(remaining);setSaved(false);if(!Object.keys(remaining).length){setBase(null);setIntent('');localStorage.removeItem(key);}
   submitted.current=null;request.current=undefined;
  },[result?.status,files,drafts,key]);
  // A completed Apply may finish while this tab is closed. Exact confirmed source
@@ -35,9 +35,9 @@ export function CodeExplorer({files,readonly=true,revision=0,blocked=false,task,
   if(readonly||blocked||base===null||revision<base)return;
   const entries=Object.entries(drafts);
   if(!entries.length||!entries.every(([p,c])=>c===null?!files.some(f=>f.path===p):files.find(f=>f.path===p)?.content===c))return;
-  setDrafts({});setBase(null);setSaved(false);localStorage.removeItem(key);
+  setDrafts({});setBase(null);setSaved(false);setIntent('');localStorage.removeItem(key);
  },[readonly,blocked,base,revision,drafts,files,key]);
- const save=()=>{if(readonly)return;try{localStorage.setItem(key,JSON.stringify({schema:1,base:base??revision,active,drafts}));setSaved(true);}catch{setError('无法保存本地草稿；浏览器存储不可用。');}};
+ const save=()=>{if(readonly)return;try{localStorage.setItem(key,JSON.stringify({schema:1,base:base??revision,active,drafts,intent}));setSaved(true);}catch{setError('无法保存本地草稿；浏览器存储不可用。');}};
  const change=(path:string,content:string|null)=>{setSaved(false);setNoop(false);setBase(b=>b??revision);setDrafts(d=>({...d,[path]:content}));};
  const add=()=>{const path=newPath.trim().replaceAll('\\','/');
   if(!path||path.startsWith('/')||path.split('/').some(p=>!p||p==='.'||p==='..'||p.startsWith('.forge')||['node_modules','.git','dist'].includes(p))){setError('请输入有效的项目内文件路径。');return;}
@@ -48,12 +48,12 @@ export function CodeExplorer({files,readonly=true,revision=0,blocked=false,task,
  }else change(current.path,null);setActive('');};
  const apply=async()=>{
   if(!onApply||readonly||blocked||submitting||stale||!changed.length||base===null)return;
-  const input={baseRevision:base,files:changed.map(([path,content])=>content===null?{path,operation:'delete' as const}:
+  const input={baseRevision:base,intent:intent.trim()||undefined,files:changed.map(([path,content])=>content===null?{path,operation:'delete' as const}:
    {path,operation:(files.some(f=>f.path===path)?'write':'create') as 'write'|'create',content}).sort((a,b)=>a.path.localeCompare(b.path))};
   const signature=JSON.stringify(input);if(request.current?.signature!==signature)request.current={signature,id:crypto.randomUUID()};
   setSubmitting(true);setError('');
   try{const receipt=await onApply({...input,requestId:request.current.id});
-   if(receipt.noop){setDrafts({});setBase(null);setAccepted('');setNoop(true);setSaved(false);submitted.current=null;request.current=undefined;localStorage.removeItem(key);}
+   if(receipt.noop){setDrafts({});setBase(null);setIntent('');setAccepted('');setNoop(true);setSaved(false);submitted.current=null;request.current=undefined;localStorage.removeItem(key);}
    else{submitted.current=Object.fromEntries(changed);setAccepted(receipt.task_id);setNoop(false);}
   }catch(e){setError(e instanceof Error?e.message:String(e));}finally{setSubmitting(false);}
  };
@@ -62,9 +62,10 @@ export function CodeExplorer({files,readonly=true,revision=0,blocked=false,task,
   <div className="flex gap-2 flex-wrap">
    <button className="btn-primary px-3 py-1 rounded" disabled={blocked||submitting||stale||!changed.length} onClick={()=>void apply()}>Apply Changes</button>
    <button className="btn-ghost px-3 py-1" disabled={submitting} onClick={save}>保存草稿</button>
-   <button className="btn-ghost px-3 py-1" disabled={submitting} onClick={()=>{setDrafts({});setBase(null);setError('');setNoop(false);setSaved(false);request.current=undefined;localStorage.removeItem(key);}}>Reload / discard draft</button>
+   <button className="btn-ghost px-3 py-1" disabled={submitting} onClick={()=>{setDrafts({});setBase(null);setIntent('');setError('');setNoop(false);setSaved(false);request.current=undefined;localStorage.removeItem(key);}}>Reload / discard draft</button>
    <span>{changed.length} 个本地修改 · revision {base??revision}</span>
   </div>
+  <input aria-label="修改说明" placeholder="这次修改做了什么？（可选，用于对话与版本标题）" maxLength={240} value={intent} onChange={e=>{setIntent(e.target.value);setSaved(false);}} className="w-full px-2 py-1 border rounded bg-[var(--panel)]"/>
   <div className="flex gap-2">
    <input aria-label="新文件路径" placeholder="src/new-file.ts" value={newPath} onChange={e=>setNewPath(e.target.value)} className="px-2 py-1 border rounded bg-[var(--panel)]"/>
    <button disabled={blocked||submitting||stale} onClick={add}>Add File</button>

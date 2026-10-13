@@ -149,7 +149,7 @@ export function WorkspaceView(props: Props) {
           <aside className="lg:w-[380px] shrink-0 flex flex-col min-h-0 max-h-[55dvh] lg:max-h-none border-b lg:border-b-0 lg:border-r border-[var(--line)] bg-[var(--panel)]">
             <div className="flex-1 min-h-0 overflow-auto">
               {props.checkingWorkspace&&<p role="status" className="p-3 text-sm">正在确认工作区状态…</p>}
-              <ConversationTimeline messages={messages} tasks={tasks} versions={versions} currentId={project?.checkpoint_id}
+              <ConversationTimeline plans={plans} messages={messages} tasks={tasks} versions={versions} currentId={project?.checkpoint_id}
                 onVersion={id=>void viewVersion(id)} onChanged={onChanged}/>
               <details className="px-4 pb-3"><summary>开发者诊断与任务详情</summary>
                <TaskPanel current={current} history={history} onChanged={onChanged} retry={actions.retry}/>

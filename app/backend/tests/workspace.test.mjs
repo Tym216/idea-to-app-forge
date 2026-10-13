@@ -496,6 +496,17 @@ assert.deepEqual((await svc('select files from public.ita_snapshots where id=$1'
 await assertForgeTablePrivileges(db);
 console.log('PASS product editor SQL: controlled create/delete, protected source, idempotency, persisted user messages, no-op no side effects, immutable parent versions and titles; existing authority preserved');
 
+
+await db.exec(readFileSync(new URL('../migrations/0011_editor_intent.sql',import.meta.url),'utf8'));
+const intentInput=[{path:'src/a.ts',content:'B'}];
+const intentReceipt=(await as('authenticated',userId,'select public.ita_submit_user_apply($1,$2,$3,$4,$5) r',[productId,'intent-change',3,JSON.stringify(intentInput),'标题微调']))[0].r;
+assert.equal((await svc('select prompt from public.ita_tasks where id=$1',[intentReceipt.task_id]))[0].prompt,'标题微调');
+assert.equal((await svc("select count(*)::int n from public.ita_messages where task_id=$1 and role='user'",[intentReceipt.task_id]))[0].n,1);
+assert.equal((await as('authenticated',userId,'select public.ita_submit_user_apply($1,$2,$3,$4,$5) r',[productId,'intent-change',3,JSON.stringify(intentInput),'标题微调']))[0].r.task_id,intentReceipt.task_id);
+await assert.rejects(as('authenticated',userId,'select public.ita_submit_user_apply($1,$2,$3,$4,$5) r',[productId,'intent-change',3,JSON.stringify(intentInput),'different intent']),/REQUEST_CONFLICT/);
+assert.equal((await svc("select has_function_privilege('authenticated','public.ita_submit_user_apply(uuid,text,bigint,jsonb,text)','EXECUTE') a,has_function_privilege('service_role','public.ita_submit_user_apply(uuid,text,bigint,jsonb,text)','EXECUTE') s"))[0].s,false);
+console.log('PASS editor intent: atomic user message/task, same-input idempotency, changed-intent conflict, old four-argument compatibility, no new authority');
+
 await db.close();
 console.log('PASS Demo SQL: numbered versions/legacy parent/immutable metadata/completion-key repeat/approval separation; User Apply ownership/active task+writer+preview/unresolved/idempotency/stale/input authority; preview revision receipt/cache invalidation (single-connection PGlite, not a dual-connection concurrency proof)');
 console.log('PASS workspace SQL: canonical hash, source privilege cutover, RLS, lease/epoch, partial recovery, no-op, stale conflict, evidence reuse, blocker/tool-error, immutable idempotent checkpoint, legacy multi-intent committed/not_applied exit, authority ACLs, third-hash rejection, completion identity, DELETE immutability, cascade (single-connection PGlite; not concurrency proof)');

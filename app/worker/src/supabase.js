@@ -313,6 +313,12 @@ export async function checkWorkspaceSchema(client = admin) {
   if (!error || error.code !== 'P0001' || !error.message.includes('LEASE_LOST')) throw stateError('工作区 RPC/0006 授权', error || { message: '自检未返回预期的拒绝结果' });
 }
 
+export async function getCheckpointSource(id,projectId) {
+ const {data,error}=await admin.from('ita_snapshots').select('id,files').eq('id',id).eq('project_id',projectId).eq('kind','checkpoint').single();
+ if(error)throw stateError('User Apply checkpoint source',error);
+ return data;
+}
+
 export async function getRequestedChangeSet(task) {
   await ensureLease(task.id);
   const { data, error } = await admin.from('ita_changesets').select('*').eq('id', task.requested_changeset_id)

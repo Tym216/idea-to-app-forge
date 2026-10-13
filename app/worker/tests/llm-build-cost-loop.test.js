@@ -127,6 +127,7 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   addMessage:async()=>{},savePlan:async()=>{planWrites++;throw new Error('unexpected Plan generation');},
   listFiles:async()=>[],getLatestPlan:async()=>null,
   getRequestedChangeSet:async()=>{throw new Error('unexpected User Apply');},
+  getCheckpointSource:async()=>{throw new Error('unexpected User Apply source');},
  };
  const mem={
   loadMemories:async()=>[{scope:'project',key:'design_system',value:JSON.stringify(design)}],

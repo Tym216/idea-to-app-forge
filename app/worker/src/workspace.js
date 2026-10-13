@@ -87,7 +87,8 @@ export class Workspace {
       await this.gateway.run('activate', writer);
       const actual = await this.gateway.scan();
       if (!newSandbox && actual.code_hash !== this.manifest.code_hash) throw sourceError('WORKSPACE_CONFLICT', '现存沙箱源码与持久化基线不同；保留原内容，需核对');
-      await this.gateway.run('materialize', writer, { files: this.manifest.files, target_hash: this.manifest.code_hash, expected_hash: actual.code_hash });
+      // Confirmed identical source needs no rewrite; avoid unnecessary HMR reloads on re-entry.
+      if(newSandbox||actual.code_hash!==this.manifest.code_hash)await this.gateway.run('materialize', writer, { files: this.manifest.files, target_hash: this.manifest.code_hash, expected_hash: actual.code_hash });
       await this.call('ita_workspace_finish_operation', { p_token: writer.token, p_hash: this.manifest.code_hash });
       await this.read();
     } catch (e) { await this.block(writer, e, e.code === 'WORKSPACE_CONFLICT' ? 'conflict' : e.code === 'WORKSPACE_PARTIAL' ? 'partial' : 'uncertain'); throw e; }
