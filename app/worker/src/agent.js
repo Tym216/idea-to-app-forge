@@ -1,3 +1,5 @@
+import { renderPersistenceHelper, PERSISTENCE_GUIDANCE } from './app-persistence.js';
+import { assertUserApplyExecution, executeUserApply, userApplyBasis } from './user-apply.js';
 import { validateRuntimeScript } from './workspace-policy.js';
 import { config } from './config.js';
 import { Workspace, shellQuote } from './workspace.js';
@@ -11,7 +13,7 @@ import { getSandboxProvider } from './sandbox/index.js';
 import { SCAFFOLD_FILES } from './scaffold.js';
 import { loadMemories, renderMemories, extractMemories, upsertMemory } from './memory.js';
 import { AgentStopError, BuildProgress, mayModifyCode, verificationAttempts, requireVerificationBudget, requireNewRevisionForVerification, MAX_VERIFY_ATTEMPTS } from './build-progress.js';
-import { DESIGN_TOKENS_PATH, renderDesignPrompt, renderDesignTokensCss, resolveDesign } from './design.js';
+import { DESIGN_TOKENS_PATH, renderDesignPrompt, renderDesignTokensCss, resolveDesign, wantsDesignChange } from './design.js';
 import { checkSandboxDependencies } from './deps-check.js';
 import { VERIFY_SPEC, RUNNER_SOURCE, PLAYWRIGHT_VERSION, validateChecks, runVerification, classifyResult, formatObservation, composeSummary } from './verify.js';
 import { withObservation, redact } from './telemetry.js';
@@ -21,6 +23,7 @@ import {
 } from './planner.js';
 import {
   admin,
+  getRequestedChangeSet,
   addMessage,
   appendStep,
   getLatestPlanVersion,
@@ -113,6 +116,7 @@ async function buildContext(task, project, files, memories) {
     '',
     memoryText,
     ...genericProjectContext(project, task).instructions,
+    PERSISTENCE_GUIDANCE,
     '',
     '当前已有代码:',
     codeDigest,
@@ -686,6 +690,7 @@ export async function executeTask(task) {
     sandbox = guardedSandbox(getSandboxProvider('daytona'));
     workspace = new Workspace({ rpc: admin.rpc.bind(admin), projectId: task.project_id, taskId: task.id, workerId: config.workerId, executionId: task.execution_id, sandbox, sandboxId: existing.sandbox_id });
     await workspace.read();
+    if (task.operation === 'user_apply') assertUserApplyExecution(task, await getRequestedChangeSet(task), workspace.state);
     if (workspace.state.writer) {
       if (workspace.state.writer.kind === 'legacy') throw sourceError('WORKSPACE_LEGACY_QUIESCENCE_REQUIRED', '旧 journal 尚未确认停止；保留原沙箱并人工核对');
       if (!existing.sandbox_id || existing.sandbox_id !== workspace.state.writer.sandbox_id) throw sourceError('WORKSPACE_UNCERTAIN', '待核对操作的原沙箱与项目绑定不一致');
@@ -698,6 +703,41 @@ export async function executeTask(task) {
     workspace.gateway.id = sandboxId;
     await updateProject(task.project_id, task.user_id, { sandbox_id: sandboxId, status: 'running' }, task.id);
     await workspace.initialize({ newSandbox: !ensured.alive });
+    if (task.operation === 'user_apply') task.context_workspace_revision = workspace.state.revision;
+  }
+  if (task.operation === 'user_apply') {
+    const project = await getProject(task.project_id, task.user_id);
+    return executeUserApply({ task, workspace, loadChange: () => getRequestedChangeSet(task),
+      onApply: async (change) => {
+        task.tool_steps += change.changes.length;
+        recordToolCall('user_apply');
+        for (const file of change.changes) recordOperation('write_file',true);
+        await appendStep(task, {tool:'user_apply',phase:'edit',event:'finished',ok:true,observation:'已确认应用：'+change.changes.map(c=>c.path).join(', ')});
+      },
+      validateBasis: async (change) => {
+        if (task.tool_steps + (change.status === 'committed' ? 0 : change.changes.length) + 3 > config.maxToolSteps) throw new AgentStopError('TOOL_STEP_LIMIT','预算不足以应用修改并完成固定验证；尚未改源码');
+        const frozen = userApplyBasis(change);
+        const plan = await getPlan(task.plan_id, task.project_id);
+        if (plan.id !== frozen.basis_id || plan.version !== task.plan_version) throw sourceError('WORKSPACE_BASIS_INVALID', 'Fixed regression basis changed');
+        const acceptance = validateAcceptance(plan.content.acceptance);
+        const buildBasis = buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId));
+        const verifyBasis = verifyFingerprint(acceptance, { runnerHash: sha256(RUNNER_SOURCE), playwrightVersion: PLAYWRIGHT_VERSION, buildBasis });
+        if (buildBasis !== frozen.build_basis || verifyBasis !== frozen.verify_basis)
+          throw sourceError('WORKSPACE_BASIS_INVALID', 'Stable validation basis is not compatible with this runtime; Apply stopped');
+        return { plan, acceptance, buildBasis, verifyBasis };
+      },
+      validateAndComplete: async (basis) => {
+        const result = await runDeterministicValidation(task, sandbox, sandboxId, workspace, basis, deps);
+        await workspace.runtime('checkpoint', async () => ({}));
+        if (buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId)) !== basis.buildBasis) throw sourceError('WORKSPACE_EVIDENCE_STALE', 'Build runtime basis changed');
+        const checkpoint = await workspace.call('ita_complete_build_checkpoint', {
+          p_key: task.id + ':checkpoint', p_revision: workspace.state.revision, p_hash: workspace.manifest.code_hash,
+          p_build_basis: basis.buildBasis, p_verify_basis: basis.verifyBasis, p_basis_id: basis.plan.id,
+          p_summary: result.summary, p_preview_url: result.previewUrl || project.preview_url,
+        });
+        return { ...result, completed: checkpoint.completed };
+      },
+    });
   }
   await updateTask(task.id, { phase: 'understand' });
   const project = await getProject(task.project_id, task.user_id);
@@ -726,13 +766,16 @@ export async function executeTask(task) {
 
   await updateTask(task.id, { phase: 'sandbox' });
   await hydrateSandbox(workspace);
-  await workspace.apply([{ operation: 'write', path: DESIGN_TOKENS_PATH, content: renderDesignTokensCss(design) }], { origin: 'design' });
+  if (!workspace.manifest.files.some((f) => f.path === 'src/forge-persistence.ts')) await workspace.apply([{ operation: 'write', path: 'src/forge-persistence.ts', content: renderPersistenceHelper(config.environmentId, task.project_id) }], { origin: 'scaffold' });
+  const preserveDesign = preserveIterationDesign(project, basis.plan, task.prompt)
+    && workspace.manifest.files.some(f=>f.path===DESIGN_TOKENS_PATH);
+  if (!preserveDesign) await workspace.apply([{ operation: 'write', path: DESIGN_TOKENS_PATH, content: renderDesignTokensCss(design) }], { origin: 'design' });
   const runtime = await buildRuntimeBasis(sandbox, sandboxId);
   const buildBasis = buildFingerprint(runtime);
   const verifyBasis = verifyFingerprint(basis.acceptance, { runnerHash: sha256(RUNNER_SOURCE), playwrightVersion: PLAYWRIGHT_VERSION, buildBasis });
   await updateTask(task.id, { phase: 'react' });
   const { summary, previewUrl, verificationKind } = await runBuild(
-    task, project, sandbox, sandboxId, context, deps, `${basis.prompt}\n\n${renderDesignPrompt(design)}`, basis.acceptance,
+    task, project, sandbox, sandboxId, context, deps, `${basis.prompt}\n\n${preserveDesign ? ITERATION_DESIGN_PROMPT : renderDesignPrompt(design)}`, basis.acceptance,
     { planChars: basis.prompt.length, runtimePolicy: webValidationPolicy(basis.plan, config.actionFusionEnabled), workspace, buildBasis, verifyBasis }
   );
 
@@ -757,3 +800,28 @@ export async function buildRuntimeBasis(sandbox, sandboxId) {
   if (r.exitCode !== 0 || r.timedOut || npm.exitCode !== 0 || npm.timedOut) throw sourceError('WORKSPACE_ENVIRONMENT', '无法取得真实构建环境依据');
   return { ...JSON.parse(r.stdout.trim()), npmVersion: npm.stdout.trim(), command: 'npm run --ignore-scripts build', installCommand: INSTALL_CMD };
 }
+
+/** Deterministic edit validation reuses the actual Worker tool pipeline; no ReAct or model calls. */
+export async function runDeterministicValidation(task, sandbox, sandboxId, workspace, basis, deps) {
+  task.plan = initialStages();
+  for (const stage of task.plan.filter(s=>['understand','read','edit'].includes(s.key))) {stage.status='done';stage.note='已确认用户提交；无模型调用';}
+  const progress = new BuildProgress({ maxFixRounds: config.maxFixRounds, fixRounds: task.fix_rounds || 0 });
+  const ctx = { task, sandbox, sandboxId, workspace, progress, deps, acceptance: basis.acceptance,
+    buildBasis: basis.buildBasis, verifyBasis: basis.verifyBasis, contextRevision: workspace.state.revision,
+    previewUrl: '', verificationResult: null, fusionEnabled: false, runtimePolicy: { workflow: 'manual', afterBuildSuccess: [] } };
+  if (task.tool_steps + 3 > config.maxToolSteps) throw new AgentStopError('TOOL_STEP_LIMIT', 'Validation budget exhausted; source preserved');
+  for (const tool of ['build', 'start_dev', 'verify']) {
+    const result = await executeOperation(ctx, tool, {}, true);
+    if (!result.ok) throw new AgentStopError('USER_APPLY_VALIDATION_FAILED', result.observation);
+  }
+  const blocked = progress.canFinish();
+  if (blocked) throw new AgentStopError('USER_APPLY_VALIDATION_FAILED', blocked);
+  return { summary: composeSummary('已应用用户提交的文件修改。', ctx.verificationResult).replace('已实现(代理说明):','已应用:'),
+    previewUrl: ctx.previewUrl, verificationKind: ctx.verificationResult.kind };
+}
+
+// Ordinary action iteration follows the confirmed workspace, including user-applied styling.
+export function preserveIterationDesign(project, plan, prompt) {
+  return Boolean(project.checkpoint_id && plan?.kind === 'action' && !wantsDesignChange(prompt));
+}
+const ITERATION_DESIGN_PROMPT = '【已有应用迭代】当前 Workspace 的布局和 src/design-tokens.css 是已有样式依据；保留用户已确认的手工修改。旧设计记忆仅供参考，不能用它重置当前样式。不重做无关界面，继续使用已有 CSS tokens、系统字体、可见焦点与响应式约定；新增依赖仍需声明和安装。';

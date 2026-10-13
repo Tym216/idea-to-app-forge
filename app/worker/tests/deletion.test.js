@@ -75,7 +75,7 @@ test('孤儿核对:只有带标签且项目不存在才是孤儿;无标签归属
 });
 
 test('沙箱标签包含 project_id / user_id;404 判定为不存在', () => {
-  assert.deepEqual(sandboxLabels({ projectId: 'p', userId: 'u' }), { app: 'forge', forge_project_id: 'p', forge_user_id: 'u' });
+  assert.deepEqual(sandboxLabels({ projectId: 'p', userId: 'u' },{environmentId:'atoms-demo',projectRef:'demo'}), { app: 'forge', forge_project_id: 'p', forge_user_id: 'u', user_id:'u',environment_id:'atoms-demo',supabase_project_ref:'demo' });
   assert.ok(isNotFound({ statusCode: 404 }) && isNotFound(new Error('Sandbox not found')) && !isNotFound(new Error('503')));
 });
 

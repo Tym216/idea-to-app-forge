@@ -16,7 +16,7 @@ export async function processOneDeletion({ rpc, getSandbox, workerId, leaseSecon
   let reason = null;
   if (job.sandbox_id) {
     try {
-      const result = await getSandbox().destroy(job.sandbox_id);
+      const result = await getSandbox().destroy(job.sandbox_id, { projectId: job.project_id, userId: job.user_id });
       logger.info('deletion.sandbox', { projectId: job.project_id, sandboxId: job.sandbox_id, existed: result?.existed !== false });
     } catch (e) {
       ok = false;

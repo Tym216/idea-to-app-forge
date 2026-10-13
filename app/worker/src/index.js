@@ -5,7 +5,7 @@ import { describeLlm, inspectModelList } from './doctor-llm.js';
 import { initTelemetry, traceTask, shutdownTelemetry } from './telemetry.js';
 import { withExecutionControl, monitorExecution, isSupabaseError } from './execution-control.js';
 import { createTaskMetrics, metricsSnapshot } from './task-metrics.js';
-// Supabase 客户端在模块导入时创建,需在配置校验通过后再动态加载
+// Supabase 客户端延迟创建；配置校验与共享环境 guard 必须先通过
 let checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease, executeTask, admin, getSandboxProvider, processOneDeletion, processOnePreviewRecovery;
 
 let stopping = false;
@@ -18,6 +18,10 @@ export function summarizeError(error, task) {
   const last = task.current_tool;
   const lastInfo = last ? `最后执行 ${last.tool},已耗时 ${Math.round(Math.max(0, performance.now() - last.started) / 1000)} 秒` : '';
   const map = {
+    USER_APPLY_VALIDATION_FAILED: ['手工修改已确认，但构建/验证未完成；源码保留', '查看错误后重新加载编辑，或恢复原任务继续固定验证；不会自动调用模型修复'],
+    WORKSPACE_REVISION_CONFLICT: ['工作区已变化，本次请求依据过期', 'Reload and reapply your edit. 不会自动合并或覆盖新版本'],
+    WORKSPACE_BASIS_INVALID: ['稳定版本的检查依据与当前运行环境不兼容', '先核对运行环境与稳定版本；不会调用模型补检查，也未应用新修改'],
+    SANDBOX_OWNERSHIP: ['沙箱环境或项目归属不匹配，已拒绝访问', '核对 Demo 标签及独立凭据；不会为旧 Main 沙箱自动补标签'],
     WORKSPACE_PARTIAL: ['部分文件已写入，整组源码尚未确认提交', '保留原沙箱；恢复会先核对基线、目标与旧锁，只接续原请求，不重复覆盖已完成文件'],
     WORKSPACE_RECONCILE_REQUIRED: ['工作区仍有待核对操作，已拒绝新写入或预览恢复', '先核对/恢复原任务；不能用新的 execution 或新沙箱绕过'],
     WORKSPACE_UNCERTAIN: ['工作区操作尚未确认结束，已停止新写入', '保留源码与原沙箱；核对命令/进程及完整 manifest 后再恢复，不能直接重跑'],
@@ -79,11 +83,21 @@ async function handleTask(task) {
   };
   const checkLease = () => ensureLease(task.id, task.execution_id);
   const stopMonitor = monitorExecution(checkLease, abort);
+  let confirmedLeaseUntil = Date.parse(task.lease_until);
+  let beating = false;
   const beat = setInterval(() => {
-    heartbeat(task.id).catch((error) => {
-      logger.warn('heartbeat.failed', { taskId: task.id, error: String(error) });
+    if (beating || controller.signal.aborted) return; // never overlap renewal cycles
+    beating = true;
+    heartbeat(task.id, { executionId: task.execution_id, confirmedLeaseUntil, signal: controller.signal,
+      onEvent: (event) => logger.info('heartbeat.' + event.event, { taskId: task.id, ...event }),
+    }).then(() => {
+      // The RPC confirmed a fresh lease. Keep a conservative local deadline for the next cycle.
+      confirmedLeaseUntil = Date.now() + config.leaseSeconds * 1000 - 2000;
+    }).catch((error) => {
+      if (controller.signal.aborted) return;
+      logger.warn('heartbeat.failed', { taskId: task.id, error: String(error), evidence: error.evidence || null });
       abort(error);
-    });
+    }).finally(() => { beating = false; });
   }, config.heartbeatMs);
 
   let timer;

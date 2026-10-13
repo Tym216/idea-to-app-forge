@@ -1,3 +1,5 @@
+import type { AppVersion } from './supabase';
+import type { ApplyReceipt, EditSubmission } from '@/components/CodeExplorer';
 import JSZip from 'jszip';
 import { supabase } from './supabase';
 import type { FeedbackCategory, Memory, MemorySuggestion, Message, Plan, PlanFeedback, PreviewRecovery, Project, ProjectFile, Task, TaskFeedback } from './supabase';
@@ -128,6 +130,7 @@ export async function listPlanFeedback(projectId: string): Promise<PlanFeedback[
 
 function rpcError(error: { message: string }): Error {
   if (/PLAN_VERSION_STALE/.test(error.message)) return new Error('计划已更新,请审阅最新版本后再操作。');
+  if (/USER_APPLY_RELOAD_REQUIRED/.test(error.message)) return new Error('手工修改不能重新生成任务。请 Reload 并重新 Apply，或恢复原任务继续验证。');
   if (/PROJECT_BUSY|ita_tasks_active_unique/.test(error.message)) return new Error('该项目已有任务，请等待完成，或继续/结束已暂停的任务。');
   return new Error(error.message);
 }
@@ -292,4 +295,23 @@ export async function listTaskFeedback(taskId: string): Promise<TaskFeedback[]> 
     .order('created_at', { ascending: false });
   if (error) throw error;
   return data as TaskFeedback[];
+}
+
+export async function submitUserApply(projectId:string,input:EditSubmission):Promise<ApplyReceipt> {
+ const {data,error}=await supabase.rpc('ita_submit_user_apply',{p_project_id:projectId,p_request_id:input.requestId,p_base_revision:input.baseRevision,p_files:input.files});
+ if(error) {
+  if(/REVISION_CONFLICT/.test(error.message)) throw new Error('Workspace changed. Reload and reapply your edit.');
+  throw rpcError(error);
+ }
+ return data;
+}
+export async function listAppVersions(projectId:string):Promise<AppVersion[]> {
+ const {data,error}=await supabase.from('ita_snapshots')
+  .select('id,project_id,version_number,parent_checkpoint_id,label,created_at,workspace_revision,code_hash,basis_id,verify_evidence')
+  .eq('project_id',projectId).not('version_number','is',null).order('version_number',{ascending:false});
+ if(error) throw error;return data ?? [];
+}
+export async function getAppVersion(id:string):Promise<AppVersion> {
+ const {data,error}=await supabase.from('ita_snapshots').select('*').eq('id',id).single();
+ if(error) throw error;return data;
 }

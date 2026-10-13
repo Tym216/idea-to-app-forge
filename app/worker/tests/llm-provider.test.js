@@ -44,7 +44,7 @@ test('新增供应商通过真实 chat 入口使用正确请求,保留返回文�
   const snapshot = { ...config };
   const savedFetch = globalThis.fetch;
   try {
-    Object.assign(config, { llmModel: '', llmBaseUrl: '', llmApiKey: '', llmJsonMode: '', planTemperature: null, buildTemperature: null, planProviderOptionsRaw: '', buildProviderOptionsRaw: '', supabaseUrl: 'https://example.test', supabaseServiceRoleKey: 'test', daytonaApiKey: 'test' });
+    Object.assign(config, { llmModel: '', llmBaseUrl: '', llmApiKey: '', llmJsonMode: '', planTemperature: null, buildTemperature: null, planProviderOptionsRaw: '', buildProviderOptionsRaw: '', environmentId:'atoms-demo',expectedSupabaseProjectRef:'abcdefghijklmnopqrst',envFileExplicit:true,supabaseUrl:'https://abcdefghijklmnopqrst.supabase.co', supabaseServiceRoleKey: 'test', daytonaApiKey: 'test' });
     for (const name of ['openrouter', 'gemini']) {
       const field = PROVIDERS[name].field;
       Object.assign(config, { llmProvider: name, [`${field}ApiKey`]: 'test-key', [`${field}Model`]: 'test-model', [`${field}JsonMode`]: 'off' });

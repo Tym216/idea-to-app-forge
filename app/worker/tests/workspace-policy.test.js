@@ -15,11 +15,11 @@ test('a known non-404 error never creates a replacement sandbox even if its text
  assert.equal(isNotFound({statusCode:401,message:'not found'}),false);
  let created=0;
  const p=Object.create(DaytonaProvider.prototype);
- p.client={get:async()=>{throw Object.assign(new Error('network unavailable'),{statusCode:503});}};
+ p.owners=new Map();p.client={get:async()=>{throw Object.assign(new Error('network unavailable'),{statusCode:503});}};
  p.create=async()=>{created++;};
- await assert.rejects(p.ensure('old'),/network/);assert.equal(created,0);
+ await assert.rejects(p.ensure('old',{projectId:'p',userId:'u'}),/network/);assert.equal(created,0);
  p.client.get=async()=>{throw {statusCode:404,message:'sandbox not found'};};
- await assert.rejects(p.ensure('old',{allowRecreate:false}));assert.equal(created,0);
+ await assert.rejects(p.ensure('old',{projectId:'p',userId:'u',allowRecreate:false}));assert.equal(created,0);
 });
 test('browser command timeout remains uncertain rather than a reusable completed tool result',async()=>{
  const {runVerification}=await import('../src/verify.js');

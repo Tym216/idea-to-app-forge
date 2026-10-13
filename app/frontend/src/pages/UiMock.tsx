@@ -71,7 +71,7 @@ function scenario(state: string) {
     default:
       return {
         tasks: [task({ status: 'succeeded', phase: 'done', finished_at: iso(5), plan: stages({ understand: 'done', read: 'done', edit: 'done', build: 'done', start: 'done', preview: 'done' }) }), OLD_FAIL],
-        plans: [planV(2, 'approved')], fb, msgs: [...msgs, { id: 'm2', project_id: 'p', role: 'assistant', content: '待办应用已构建并启动。', meta: {}, task_id: 'a1b2c3d4-0000-0000-0000-000000000000', created_at: iso(5) }],
+        plans: [planV(2, 'approved')], fb, msgs: [...msgs, { id: 'm2', project_id: 'p', role: 'assistant' as const, content: '待办应用已构建并启动。', meta: {}, task_id: 'a1b2c3d4-0000-0000-0000-000000000000', created_at: iso(5) }],
         files: [file], project: { ...PROJECT, preview_url: '/ui-mock-preview.html' },
       };
   }

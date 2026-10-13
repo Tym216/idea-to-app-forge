@@ -1,3 +1,5 @@
+import {config} from '../src/config.js';
+Object.assign(config,{environmentId:'atoms-demo',expectedSupabaseProjectRef:'abcdefghijklmnopqrst',envFileExplicit:true,supabaseUrl:'https://abcdefghijklmnopqrst.supabase.co',supabaseServiceRoleKey:'offline-key'});
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

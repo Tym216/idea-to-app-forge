@@ -39,20 +39,24 @@ export async function processOnePreviewRecovery({ rpc, getSandbox, workerId, wor
   if (error) throw new Error(`preview claim: ${error.message}`);
   const job = Array.isArray(data) ? data[0] : data;
   if (!job?.project_id) return null;
+  let readyBasis;
   const update = async (phase, url = null, error = null) => {
     const result = await rpc('ita_update_preview_recovery', {
       p_project_id: job.project_id, p_worker_id: workerId, p_execution_id: job.execution_id,
       p_phase: phase, p_url: url, p_error: error,
+      ...(phase === 'ready' ? { p_revision: readyBasis?.revision, p_hash: readyBasis?.hash } : {}),
     });
     if (result.error) throw new Error(`preview save: ${result.error.message}`);
     if (result.data !== true) { const e = new Error('预览恢复许可已失效'); e.code = 'LEASE_LOST'; throw e; }
   };
   try {
     const provider = getSandbox();
+    provider.bindOwner?.(job.sandbox_id, { projectId: job.project_id, userId: job.user_id });
     const workspace = workspaceFactory({ rpc, projectId: job.project_id, workerId, executionId: job.execution_id, sandbox: provider, sandboxId: job.sandbox_id });
-    await workspace.initialize({ reconcilePending: false, wake: () => provider.ensure(job.sandbox_id, { allowRecreate: false }) });
+    await workspace.initialize({ reconcilePending: false, wake: () => provider.ensure(job.sandbox_id, { projectId: job.project_id, userId: job.user_id, allowRecreate: false }) });
     if (workspace.manifest) validateRuntimeScript(workspace.manifest, 'dev');
     const url = await workspace.runtime('preview', () => recoverExistingPreview(provider, job.sandbox_id, update));
+    readyBasis = { revision: workspace.state?.revision, hash: workspace.manifest?.code_hash };
     await update('ready', url);
     logger.info('preview.recovered', { projectId: job.project_id, sandboxId: job.sandbox_id });
     return { status: 'ready' };

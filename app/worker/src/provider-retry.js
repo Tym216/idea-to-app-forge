@@ -1,5 +1,8 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
+// Shared with diagnostics/cost modeling; extraction does not increase the existing retry budget.
+export const MAX_PROVIDER_ATTEMPTS = 2;
+
 export function retryAfterMs(value, now = Date.now()) {
   if (value == null || String(value).trim() === '') return null;
   const seconds = Number(value);
@@ -48,7 +51,7 @@ export async function withProviderRetry(send, {
       throw Object.assign(new Error('模型请求时间预算已耗尽，未继续重发'), { code: 'LLM_TIMEOUT' });
     }
   };
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let attempt = 1; attempt <= MAX_PROVIDER_ATTEMPTS; attempt++) {
     checkActive();
     await beforeAttempt(attempt);
     checkActive();
@@ -57,7 +60,7 @@ export async function withProviderRetry(send, {
       // Preserve the provider's classified timeout unless the caller cancelled.
       signal?.throwIfAborted();
       const decision = classifyProviderError(error);
-      if (attempt === 2 || decision.action !== 'retry_once' || activeSignal.aborted) throw error;
+      if (attempt === MAX_PROVIDER_ATTEMPTS || decision.action !== 'retry_once' || activeSignal.aborted) throw error;
       const ms = Math.max(error.retryAfterMs ?? 0, 300 + Math.floor(Math.max(0, Math.min(1, random())) * 300));
       // Honour Retry-After, but do not wait indefinitely or start with an exhausted budget.
       if (ms > 5000 || deadline - now() <= ms + 1000) throw error;

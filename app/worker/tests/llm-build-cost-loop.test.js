@@ -1,0 +1,194 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { config } from '../src/config.js';
+import { logger } from '../src/logger.js';
+import { chat } from '../src/llm.js';
+import { withExecutionControl } from '../src/execution-control.js';
+import { sourceManifest } from '../src/managed-source.js';
+import { shellQuote } from '../src/workspace.js';
+import { extractMemories } from '../src/memory.js';
+
+const profile={
+ environmentId:'atoms-demo', // same stable namespace as the real Demo Worker
+ llmProvider:'openrouter',llmModel:'qwen/qwen3.8-flash',llmApiKey:'offline',
+ llmBaseUrl:'https://offline.invalid/v1',llmJsonMode:'off',llmTimeoutMs:120000,
+ llmMaxOutputTokens:'',llmMaxOutputTokensPlan:4096,llmMaxOutputTokensMemory:1024,llmMaxOutputTokensBuild:4096,
+ llmRequireOutputCap:true,llmOmitTemperature:true,llmRequireReasoningPolicy:true,
+ llmReasoningEffortPlan:'none',llmReasoningEffortMemory:'none',llmReasoningEffortBuild:'none',
+ llmRequireCostBudget:true,llmCostInputUsdPerMillion:'0.20',llmCostOutputUsdPerMillion:'0.47',
+ llmMaxTheoreticalCostUsdPerExecution:'0.10',planProviderOptionsRaw:'{}',buildProviderOptionsRaw:'{}',
+ planTemperature:0.2,buildTemperature:0.1,maxToolSteps:40,maxFixRounds:1,actionFusionEnabled:true,
+ fusionMaxFiles:8,fusionMaxBytes:131072,
+};
+const design={
+ scenario:'Customer records',style:'simple',
+ layout:{type:'single-column',description:'single column'},
+ colors:{background:'#F7F7F5',surface:'#FFFFFF',text:'#1F2328',textMuted:'#5B636E',
+ primary:'#2F5BD3',onPrimary:'#FFFFFF',border:'#E2E4E8',danger:'#B42318',success:'#1E7F4F'},
+ typography:{fontFamily:'system-ui',scale:{h1:'28px',h2:'18px',body:'16px',small:'13px'}},
+ spacing:[4,8,12,16,24,32],breakpoints:{mobile:640,desktop:1024},states:['empty','hover','focus','disabled'],
+};
+const acceptance=[{id:'A1',action:'open app',expect:'records visible',external:false,
+ steps:[{op:'expectText',selector:'main',contains:'records'}]}];
+const passed={base:{blocking:[],warnings:[]},checks:[{id:'A1',status:'pass'}],screenshots:[]};
+
+/** Link the unchanged agent.js to offline persistence/sandbox adapters.
+ * executeTask, runBuild, tool pipeline, common chat, memory and completion call stay real.
+ * No source on disk is rewritten, and no SDK/DB/provider operation can escape the mocks.
+ */
+async function fixture({pathological=false, verification=passed, budget='0.10'}={}) {
+ const prior={...config},oldFetch=globalThis.fetch,oldLogger={...logger};
+ Object.assign(config,profile,{llmMaxTheoreticalCostUsdPerExecution:budget});
+ const logs=[],files=new Map(),operations=[],events=[];
+ const task={id:randomUUID(),project_id:'offline-project',user_id:'offline-user',execution_id:randomUUID(),
+  mode:'build',operation:'agent',kind:'new',prompt:'Build the approved plan',plan_id:'offline-plan',plan_version:1,
+  tool_steps:0,fix_rounds:0,steps:[]};
+ const project={id:task.project_id,user_id:task.user_id,name:'Records',description:'Customer records',
+  sandbox_id:null,checkpoint_id:null};
+ const plan={id:task.plan_id,project_id:task.project_id,version:1,kind:'plan',status:'approved',
+  content:{understanding:'Customer records',scope:['records'],flows:['open records'],rules:['preserve data'],
+   storage:'localStorage',steps:['implement'],design:'simple',acceptance,questions:[]}};
+ let workspace,posts=0,decisions=0,memories=0,checkpoints=0;
+ const sb={
+  workdir:'/offline',
+  async ensure(){operations.push('ensure');return {sandboxId:'offline-sandbox',alive:false};},
+  async readFile(_id,path){if(!files.has(path))throw new Error('missing');return files.get(path);},
+  async listFiles(){return [...files.keys()];},
+  async writeFile(){operations.push('verification artifact');},
+  async exec(_id,command){
+   operations.push(command);
+   let stdout='';
+   if(command.startsWith('node -e '))stdout=JSON.stringify({nodeVersion:'offline',platform:'linux',arch:'x64',environmentHash:'fixture'});
+   if(command==='npm --version')stdout='10.0.0';
+   if(command.startsWith('printf %s'))stdout='/offline';
+   if(command.includes('echo READY'))stdout='READY';
+   if(command.includes('node run.mjs spec.json'))stdout='__FORGE_VERIFY__'+JSON.stringify(verification);
+   return {exitCode:0,stdout,stderr:''};
+  },
+  async startBackground(){operations.push('start_dev');return {commandId:'offline'};},
+  async isPortListening(){return true;},async readLogs(){return '';},
+  async previewUrl(){return 'https://offline.invalid/preview';},
+ };
+ class OfflineWorkspace {
+  constructor(){workspace=this;this.state={revision:0,state:'confirmed',writer:null};this.gateway={};this.manifest=sourceManifest([]);}
+  async read(){return this.state;}
+  async initialize(){}
+  async assertCurrent(rev){assert.equal(rev,this.state.revision);}
+  async runtime(kind,fn){operations.push('runtime:'+kind);return fn();}
+  valid(kind,basis){const e=this.state[kind];return !!e&&e.revision===this.state.revision&&e.code_hash===this.manifest.code_hash&&e.basis===basis;}
+  async evidence(kind,basis,status,result){this.state[kind]={basis,status,result,revision:this.state.revision,code_hash:this.manifest.code_hash};events.push('evidence:'+kind+':'+status);}
+  async apply(changes,{beforeWrite=async()=>{},onWriteSuccess=async()=>{},invalidate=()=>{}}={}){
+   let changed=false;
+   for(const [i,c] of changes.entries()){
+    await beforeWrite(i,c.path);const different=files.get(c.path)!==c.content;
+    if(different){files.set(c.path,c.content);changed=true;}
+    await onWriteSuccess(i,c,different);
+   }
+   if(changed){this.state.revision++;this.manifest=sourceManifest([...files].map(([path,content])=>({path,content})));invalidate();}
+   return {status:'succeeded',operations:changes.map(c=>({kind:'write_file',path:c.path,status:'succeeded'})),changed};
+  }
+  async call(name,args){
+   assert.equal(name,'ita_complete_build_checkpoint');
+   assert.ok(this.valid('build',args.p_build_basis));assert.equal(this.state.build.status,'passed');
+   assert.ok(this.valid('verify',args.p_verify_basis));assert.equal(this.state.verify.status,'passed');
+   assert.equal(args.p_revision,this.state.revision);assert.equal(args.p_hash,this.manifest.code_hash);
+   events.push('checkpoint');checkpoints++;return {completed:true};
+  }
+ }
+ const db={
+  admin:{rpc:async()=>{throw new Error('unexpected RPC');}},
+  getProject:async()=>project,getPlan:async()=>plan,getLatestPlanVersion:async()=>1,
+  listFeedback:async()=>[],ensureLease:async()=>{},
+  updateTask:async()=>{},updateProject:async()=>{},
+  appendStep:async(t,step)=>t.steps.push(step),
+  addMessage:async()=>{},savePlan:async()=>{throw new Error('unexpected Plan generation');},
+  listFiles:async()=>[],getLatestPlan:async()=>null,
+  getRequestedChangeSet:async()=>{throw new Error('unexpected User Apply');},
+ };
+ const mem={
+  loadMemories:async()=>[{scope:'project',key:'design_system',value:JSON.stringify(design)}],
+  renderMemories:(await import('../src/memory.js')).renderMemories,
+  upsertMemory:async()=>{throw new Error('unexpected memory write');},
+  extractMemories:async(arg)=>{events.push('memory');return extractMemories(arg,{
+   chat,upsertMemory:async()=>{throw new Error('unexpected upsert');},
+   suggestMemory:async()=>{throw new Error('unexpected suggestion');},deleteMemory:async()=>{throw new Error('unexpected delete');},
+  });},
+ };
+ const binding='__forgeCostFixture_'+randomUUID().replaceAll('-','');
+ globalThis[binding]={db,mem,ws:{Workspace:OfflineWorkspace,shellQuote},sandbox:{getSandboxProvider:()=>sb}};
+ const encodeModule=(group,names)=>'data:text/javascript;base64,'+Buffer.from(
+  'const f=globalThis['+JSON.stringify(binding)+'].'+group+';\n'+names.map(n=>'export const '+n+'=f.'+n+';').join('\n')).toString('base64');
+ const fakeModules={
+  './supabase.js':encodeModule('db',Object.keys(db)),
+  './memory.js':encodeModule('mem',Object.keys(mem)),
+  './workspace.js':encodeModule('ws',['Workspace','shellQuote']),
+  './sandbox/index.js':encodeModule('sandbox',['getSandboxProvider']),
+ };
+ const source=readFileSync(new URL('../src/agent.js',import.meta.url),'utf8').replace(
+  /from '(\.[^']+)'/g,(_match,path)=>'from '+JSON.stringify(fakeModules[path]||new URL(path,new URL('../src/agent.js',import.meta.url)).href));
+ for(const level of ['info','warn','error'])logger[level]=(event,data)=>logs.push({event,...data});
+ globalThis.fetch=async(_url,request)=>{
+  const b=JSON.parse(request.body);assert.equal(b.reasoning.effort,'none');
+  assert.equal(Object.hasOwn(b,'temperature'),false);assert.equal(b.provider.require_parameters,true);
+  const last=logs.findLast(l=>l.event==='llm.cost_admission');
+  assert.ok(last.admitted);assert.ok(last.execution_reserved_after<=Number(budget));posts++;
+  let output;
+  if(b.max_tokens===1024){memories++;output={upsert:[],remove:[]};}
+  else{
+   assert.equal(b.max_tokens,4096);decisions++;
+   output=pathological?{tool:'list_files',args:{}}:decisions===1?{
+    tool:'apply_changes',args:{changes:[{operation:'write',path:'src/App.tsx',content:'export default function App(){return <main>records</main>}'}],after:'build'},
+   }:{tool:'finish',args:{summary:'Customer records ready'}};
+  }
+  return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}],
+   usage:{prompt_tokens:1,completion_tokens:1,cost:0.000001}}));
+ };
+ try {
+  const {executeTask}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+  const control={taskId:task.id,executionId:task.execution_id,signal:new AbortController().signal,checkLease:async()=>{}};
+  let result,error;
+  try{result=await withExecutionControl(control,()=>executeTask(task));}catch(e){error=e;}
+  return {result,error,posts,decisions,memories,checkpoints,logs,events,operations,task,workspace};
+ }finally{Object.assign(config,prior);globalThis.fetch=oldFetch;Object.assign(logger,oldLogger);delete globalThis[binding];}
+}
+
+test('unchanged real 40-step Build loop stops at exact pre-HTTP budget boundary, never reaches checkpoint',async()=>{
+ const f=await fixture({pathological:true});
+ assert.equal(config.maxToolSteps,40);
+ assert.equal(f.error?.code,'LLM_COST_BUDGET_EXCEEDED');assert.equal(f.checkpoints,0);
+ assert.equal(f.memories,0);assert.ok(f.decisions>0&&f.decisions<40);
+ assert.equal(f.task.tool_steps,f.decisions);
+ const admitted=f.logs.filter(l=>l.event==='llm.cost_admission'&&l.admitted);
+ const blocked=f.logs.find(l=>l.event==='llm.cost_admission'&&!l.admitted);
+ assert.equal(f.posts,admitted.length);
+ assert.ok(blocked.execution_reserved_before+blocked.request_theoretical_max_usd>0.1);
+ assert.equal(blocked.execution_reserved_before,blocked.execution_reserved_after);
+ assert.equal(blocked.execution_reserved_before,admitted.at(-1).execution_reserved_after);
+ assert.ok(f.workspace.manifest.files.length>0);assert.equal(f.workspace.state.writer,null);
+ console.log('offline-pathological-proof',JSON.stringify({initial_request:admitted[0].request_theoretical_max_usd,
+  admitted_posts:f.posts,consumed_steps:f.task.tool_steps,ceiling:0.1,reserved:blocked.execution_reserved_before,
+  blocked_next:blocked.request_theoretical_max_usd,blocked_post_count:0,checkpoints:f.checkpoints}));
+});
+
+test('short real executeTask Build+Memory share reservations and reach normal evidence-checked checkpoint caller',async()=>{
+ const f=await fixture();assert.ifError(f.error);assert.equal(f.result.completed,true);
+ assert.equal(f.decisions,2);assert.equal(f.memories,1);assert.equal(f.posts,3);assert.equal(f.checkpoints,1);
+ const admissions=f.logs.filter(l=>l.event==='llm.cost_admission');
+ assert.equal(admissions.length,3);
+ assert.deepEqual(admissions.map(l=>l.purpose),['build_decision','build_decision','memory_extraction']);
+ for(let i=1;i<3;i++)assert.equal(admissions[i].execution_reserved_before,admissions[i-1].execution_reserved_after);
+ assert.ok(f.events.indexOf('checkpoint')>f.events.indexOf('memory'));
+ assert.ok(f.events.includes('evidence:build:passed'));assert.ok(f.events.includes('evidence:verify:passed'));
+ console.log('offline-success-proof',JSON.stringify({initial_request:admissions[0].request_theoretical_max_usd,
+  posts:f.posts,reserved_total:admissions.at(-1).execution_reserved_after,purposes:admissions.map(l=>l.purpose),
+  checkpoint_count:f.checkpoints,steps:f.task.tool_steps}));
+});
+
+test('actual terminal blocker/tool_error path cannot checkpoint or spend Memory budget',async()=>{
+ for(const verification of [{toolError:'offline verifier failure'},{...passed,base:{blocking:['runtime crash'],warnings:[]}}]){
+  const f=await fixture({verification});assert.ok(['VERIFY_TOOL_ERROR','VERIFY_FAILED'].includes(f.error?.code));
+  assert.equal(f.checkpoints,0);assert.equal(f.memories,0);assert.equal(f.posts,1);
+ }
+});

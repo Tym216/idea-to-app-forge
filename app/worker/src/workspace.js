@@ -155,6 +155,26 @@ export class Workspace {
       return { status: 'succeeded', operations, ...committed };
     } catch (e) { await this.block(writer, e, e.code === 'WORKSPACE_CONFLICT' ? 'conflict' : e.code === 'WORKSPACE_PARTIAL' ? 'partial' : 'uncertain'); throw e; }
   }
+  /** Executes the already persisted user ChangeSet, never prepares a second mutation. */
+  async applyRequested(change) {
+    await this.read();
+    if (change.status === 'committed') return { revision: change.resulting_revision, reused: true };
+    if (change.actor !== 'user' || change.task_id !== this.scope.p_task_id || change.status !== 'prepared'
+      || change.base_revision !== this.state.revision || change.base_hash !== this.manifest.code_hash)
+      throw sourceError('WORKSPACE_REVISION_CONFLICT', 'User Apply is stale; reload and reapply');
+    const baseline = this.manifest, target = applySourceChanges(baseline, change.changes);
+    if (target.code_hash !== change.target_hash) throw sourceError('WORKSPACE_CONFLICT', 'Persisted submission hash mismatch');
+    const writer = await this.acquire('mutation', change.id);
+    try {
+      await this.gateway.run('activate', writer);
+      if ((await this.gateway.scan()).code_hash !== baseline.code_hash) throw sourceError('WORKSPACE_CONFLICT', 'Physical source changed before Apply');
+      const result = await this.gateway.run('promote', writer, { baseline: baseline.files, files: target.files, target_hash: target.code_hash });
+      return await this.commit(writer, change, result.manifest);
+    } catch (e) {
+      await this.block(writer, e, e.code === 'WORKSPACE_CONFLICT' ? 'conflict' : e.code === 'WORKSPACE_PARTIAL' ? 'partial' : 'uncertain');
+      throw e;
+    }
+  }
   async runtime(kind, run, { adoptLockfile = false, baseRevision = this.state?.revision } = {}) {
     await this.read();
     if (baseRevision == null || baseRevision !== this.state.revision) throw sourceError('WORKSPACE_REVISION_CONFLICT', '运行请求的源码依据已变更，未执行');

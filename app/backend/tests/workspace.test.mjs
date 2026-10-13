@@ -19,7 +19,7 @@ const [{id: task}] = (await db.query("insert into public.ita_tasks(project_id,us
 await db.exec('set role service_role');
 await db.query("update public.ita_tasks set status='running',worker_id='w',execution_id=$1,lease_until=now()+interval '1 hour' where id=$2",[exec,task]);
 await db.exec('reset role');
-const [{id: plan}] = (await db.query("insert into public.ita_plans(project_id,user_id,version,kind,status,content) values($1,$2,1,'action','approved','{}') returning id",[project,userId])).rows;
+const [{id: plan}] = (await db.query(`insert into public.ita_plans(project_id,user_id,version,kind,status,content) values($1,$2,1,'action','approved','{"acceptance":[{"id":"A1","action":"查看","expect":"内容","external":false,"steps":[{"op":"expectText","selector":"main","contains":"A"}]}]}') returning id`,[project,userId])).rows;
 await db.exec('set role service_role');
 await db.query('update public.ita_tasks set plan_id=$1,plan_version=1 where id=$2',[plan,task]);
 await db.exec('reset role');
@@ -34,6 +34,7 @@ await db.exec('set role service_role');
 await db.query("update public.ita_tasks set steps=$1,status='running',worker_id='w',execution_id=$2,lease_until=now()+interval '1 hour' where id=$3",[JSON.stringify(legacyIntents),legacyExec,legacyTask]);
 await db.exec('reset role');
 await db.exec(readFileSync(new URL('../migrations/0006_workspace_contract.sql',import.meta.url),'utf8'));
+for (const name of ['0007_app_versions.sql','0008_user_apply.sql','0009_preview_basis.sql']) await db.exec(readFileSync(new URL('../migrations/'+name,import.meta.url),'utf8'));
 await assertForgeTablePrivileges(db);
 async function as(role,uid,sql,args=[]) {
  await db.query('select set_config($1,$2,false)',['request.jwt.claims',uid?JSON.stringify({sub:uid}):'']); await db.exec(`set role ${role}`);
@@ -104,7 +105,13 @@ c=await call('ita_workspace_prepare',['noop','agent',1,'[]',hash(target)],['text
 w=await call('ita_workspace_acquire',[randomUUID(),'mutation','sb',c.id],['uuid','text','text','uuid']);
 await call('ita_workspace_commit',[w.token,c.id,JSON.stringify(target),hash(target)],['uuid','uuid','jsonb','text']);
 assert.equal((await read()).revision,1); assert.equal((await read()).build.basis_fingerprint,b);
-const done=await complete(); assert.equal(done.completed,true);
+const legacyBefore=(await db.query("insert into public.ita_snapshots(project_id,user_id,files,label) values($1,$2,'[]','legacy') returning id",[project,userId])).rows[0].id;
+const immutableLegacyBefore=(await db.query('select to_jsonb(s) s from public.ita_snapshots s where id=$1',[legacyBefore])).rows[0].s;
+await db.query('update public.ita_projects set checkpoint_id=$1 where id=$2',[legacyBefore,project]);
+const done=await complete();
+assert.equal((await db.query('select parent_checkpoint_id from public.ita_snapshots where id=$1',[done.snapshot_id])).rows[0].parent_checkpoint_id,legacyBefore);
+assert.deepEqual((await db.query('select to_jsonb(s) s from public.ita_snapshots s where id=$1',[legacyBefore])).rows[0].s,immutableLegacyBefore);
+ assert.equal(done.completed,true);
 assert.equal((await complete()).snapshot_id,done.snapshot_id);
 const completionArgs=['finish',1,hash(target),b,v,plan,'summary','https://preview.test/'];
 for(const [index,value] of [[3,'e'.repeat(64)],[4,'e'.repeat(64)],[5,randomUUID()],[6,'different summary']]) {
@@ -114,7 +121,7 @@ for(const [index,value] of [[3,'e'.repeat(64)],[4,'e'.repeat(64)],[5,randomUUID(
 // A lost completion response may be retried after execution has ended; provenance/URL is not identity.
 scope[3]=randomUUID();completionArgs[7]='https://preview.test/?token=refreshed';
 assert.equal((await call('ita_complete_build_checkpoint',completionArgs,['text','bigint','text','text','text','uuid','text','text'])).snapshot_id,done.snapshot_id);
-assert.equal((await svc('select count(*)::int n from public.ita_snapshots where project_id=$1',[project]))[0].n,1);
+assert.equal((await svc("select count(*)::int n from public.ita_snapshots where project_id=$1 and kind='checkpoint'",[project]))[0].n,1);
 assert.equal((await svc('select count(*)::int n from public.ita_messages where project_id=$1',[project]))[0].n,1);
 assert.equal((await svc('select phase from public.ita_tasks where id=$1',[task]))[0].phase,'done_with_warnings');
 await assert.rejects(db.query("update public.ita_snapshots set files='[]' where id=$1",[done.snapshot_id]),/IMMUTABLE/);
@@ -142,6 +149,145 @@ const legacyResolved=(await legacyResolve([{path:'a.ts',content:'A'}]))[0].r;
 assert.equal(legacyResolved.state,'confirmed');assert.equal(legacyResolved.revision,1);
 assert.deepEqual(legacyResolved.outcomes.map(o=>o.status).sort(),['committed','not_applied']);
 assert.equal((await legacyAcquire()).length,1); // successful normal admission only after all blockers resolved
+
+// Demo additions use real local SQL/RLS, not direct client source DML.
+assert.equal(done.version_number,1);
+const snapshotBefore=(await db.query('select to_jsonb(s) s from public.ita_snapshots s where id=$1',[done.snapshot_id])).rows[0].s;
+for(const col of ['version_number','parent_checkpoint_id'])
+ await assert.rejects(db.query('update public.ita_snapshots set '+col+'=null where id=$1',[done.snapshot_id]),/IMMUTABLE/);
+assert.deepEqual((await db.query('select to_jsonb(s) s from public.ita_snapshots s where id=$1',[done.snapshot_id])).rows[0].s,snapshotBefore);
+const submit=(id='edit-one',base=1,fs=[{path:'src/a.ts',content:'B'}],uid=userId)=>as('authenticated',uid,'select public.ita_submit_user_apply($1,$2,$3,$4) r',[project,id,base,JSON.stringify(fs)]).then(x=>x[0].r);
+await assert.rejects(submit('foreign',1,undefined,other),/NOT_OWNED/);
+await assert.rejects(as('anon',null,'select public.ita_submit_user_apply($1,$2,1,$3)',[project,'anon','[]']),/permission/);
+await assert.rejects(submit('stale',0),/REVISION_CONFLICT/);
+await assert.rejects(submit('new-file',1,[{path:'src/new.ts',content:'X'}]),/EXISTING_TEXT_ONLY/);
+await assert.rejects(submit('hidden-fields',1,[{path:'src/a.ts',content:'B',result:'committed'}]),/INPUT/);
+await db.query("update public.ita_projects set workspace_writer='{}' where id=$1",[project]);
+await assert.rejects(submit('writer'),/RECONCILE/);
+await db.query('update public.ita_projects set workspace_writer=null where id=$1',[project]);
+const blockerId=randomUUID();
+await db.query("insert into public.ita_changesets(id,project_id,user_id,request_id,actor,origin,status,changes) values($1,$2,$3,'block','agent','agent','uncertain','[]')",[blockerId,project,userId]);
+await assert.rejects(submit('unresolved'),/RECONCILE/);
+await db.query('delete from public.ita_changesets where id=$1',[blockerId]);
+const busyTask=(await svc("insert into public.ita_tasks(project_id,user_id,prompt) values($1,$2,'busy') returning id",[project,userId]))[0].id;
+for(const status of ['queued','running','paused']) {
+ await svc('update public.ita_tasks set status=$1 where id=$2',[status,busyTask]);
+ await assert.rejects(submit('busy-'+status),/PROJECT_BUSY/);
+}
+await svc("update public.ita_tasks set status='cancelled' where id=$1",[busyTask]);
+// Pure no-op must not allocate a task/ChangeSet/version or spend build/verify/model budget.
+const noOpState=async()=>({
+ source:(await db.query('select workspace_revision,workspace_hash,workspace_build,workspace_verify from public.ita_projects where id=$1',[project])).rows[0],
+ counts:(await db.query('select (select count(*)::int from public.ita_tasks where project_id=$1) tasks,(select count(*)::int from public.ita_changesets where project_id=$1) changesets,(select count(*)::int from public.ita_snapshots where project_id=$1) snapshots',[project])).rows[0],
+});
+const beforeNoOp=await noOpState();
+assert.deepEqual(await submit('same-content',1,[{path:'src/a.ts',content:'A'}]),{accepted:true,noop:true});
+assert.deepEqual(await noOpState(),beforeNoOp);
+console.log('PASS same-content User Apply: authoritative no-op, no task/ChangeSet/revision/version, no scheduled build/verify/LLM');
+await db.query("update public.ita_projects set checkpoint_id=null where id=$1",[project]);
+await assert.rejects(submit('no-basis'),/STABLE_BASIS/);
+// No-op is only a source comparison: it does not require another publication basis.
+assert.deepEqual(await submit('same-content-without-basis',1,[{path:'src/a.ts',content:'A'}]),{accepted:true,noop:true});
+assert.deepEqual(await noOpState(),beforeNoOp);
+
+await db.query("update public.ita_projects set checkpoint_id=$1 where id=$2",[done.snapshot_id,project]);
+
+ // Preview ready is a receipt for the exact checked revision/hash, never just a URL.
+ await svc('update public.ita_projects set sandbox_id=$1 where id=$2',['sb',project]);
+ const previewQueued=(await as('authenticated',userId,'select to_jsonb(public.ita_request_preview_recovery($1)) j',[project]))[0].j;
+ await assert.rejects(submit('preview-active'),/PROJECT_BUSY/);
+ const previewJob=(await svc('select * from public.ita_claim_preview_recovery($1)',['w']))[0];
+ await assert.rejects(svc('select public.ita_update_preview_recovery($1,$2,$3,$4,$5,null,$6,$7)',[project,'w',previewJob.execution_id,'ready','https://fixture.test/',0,hash(target)]),/SOURCE_NOT_CONFIRMED/);
+ await svc('select public.ita_update_preview_recovery($1,$2,$3,$4,$5,null,$6,$7)',[project,'w',previewJob.execution_id,'ready','https://fixture.test/',1,hash(target)]);
+ const readyRow=(await svc('select * from public.ita_preview_recoveries where project_id=$1',[project]))[0];
+ assert.equal(readyRow.ready_revision,1);assert.equal(readyRow.ready_hash,hash(target));
+ await db.query("update public.ita_preview_recoveries set ready_hash='old' where project_id=$1",[project]);
+ assert.equal((await as('authenticated',userId,'select (public.ita_request_preview_recovery($1)).status s',[project]))[0].s,'queued');
+ const previewAgain=(await svc('select * from public.ita_claim_preview_recovery($1)',['w']))[0];
+ await svc('select public.ita_update_preview_recovery($1,$2,$3,$4,null,$5)',[project,'w',previewAgain.execution_id,'failed','fixture reset']);
+
+const receipt=await submit();
+assert.equal((await submit()).task_id,receipt.task_id);
+await assert.rejects(submit('edit-one',1,[{path:'src/a.ts',content:'C'}]),/REQUEST_CONFLICT/);
+const requested=(await svc('select * from public.ita_changesets where id=$1',[receipt.changeset_id]))[0];
+const requestedTask=(await svc('select * from public.ita_tasks where id=$1',[receipt.task_id]))[0];
+assert.equal(requested.actor,'user');assert.equal(requestedTask.operation,'user_apply');
+assert.equal(requestedTask.plan_id,plan);
+const frozenSubmission={checkpoint_id:done.snapshot_id,basis_id:plan,build_basis:b,verify_basis:v};
+assert.deepEqual(requested.submission_basis,frozenSubmission);
+assert.deepEqual(requested.result,{});
+await assert.rejects(db.query("update public.ita_changesets set submission_basis=jsonb_set(submission_basis,'{basis_id}','null') where id=$1",[requested.id]),/SUBMISSION_IMMUTABLE/);
+
+assert.equal((await db.query('select workspace_revision r from public.ita_projects where id=$1',[project])).rows[0].r,1); // Accepted is not Applied.
+await assert.rejects(db.query("update public.ita_changesets set changes='[]' where id=$1",[requested.id]),/SUBMISSION_IMMUTABLE/);
+await assert.rejects(as('authenticated',userId,"update public.ita_files set content='C' where project_id=$1",[project]),/permission/);
+let applyExec=randomUUID();scope[1]=receipt.task_id;scope[3]=applyExec;
+await svc("update public.ita_tasks set status='running',worker_id='w',execution_id=$1,lease_until=now()+interval '1 hour' where id=$2",[applyExec,receipt.task_id]);
+w=await call('ita_workspace_acquire',[randomUUID(),'mutation','sb',requested.id],['uuid','text','text','uuid']);
+// All generic failure outcomes must persist without touching immutable submission inputs.
+// A new execution reconciles this same request; no duplicate prepare or ChangeSet is allowed.
+for(const state of ['partial','uncertain','conflict']) {
+ const outcome={error:'fixture '+state,basis_id:'execution-outcome-only',status:state};
+ await call('ita_workspace_result',[w.token,state,JSON.stringify(outcome)],['uuid','text','jsonb']);
+ const failedChange=(await svc('select * from public.ita_changesets where id=$1',[requested.id]))[0];
+ assert.equal(failedChange.status,state);assert.deepEqual(failedChange.result,outcome);
+ assert.deepEqual(failedChange.submission_basis,frozenSubmission);
+ assert.equal((await read()).state,state);
+ await svc("update public.ita_tasks set status='failed' where id=$1",[receipt.task_id]);
+ const resumed=(await as('authenticated',userId,'select to_jsonb(public.ita_retry_task($1,$2)) t',[receipt.task_id,'resume']))[0].t;
+ assert.equal(resumed.requested_changeset_id,requested.id);
+ applyExec=randomUUID();scope[3]=applyExec;
+ await svc("update public.ita_tasks set status='running',worker_id='w',execution_id=$1,lease_until=now()+interval '1 hour' where id=$2",[applyExec,receipt.task_id]);
+ const retired=w.token;
+ const reconcile=await call('ita_workspace_reconcile',[retired,true,hash(target),JSON.stringify(target)],['uuid','boolean','text','jsonb']);
+ assert.equal(reconcile.state,'continue_recorded');assert.equal(reconcile.changeset.id,requested.id);
+ assert.deepEqual(reconcile.changeset.submission_basis,frozenSubmission);
+ w=reconcile.writer;
+ assert.notEqual(w.token,retired);
+ assert.equal((await svc("select count(*)::int n from public.ita_changesets where project_id=$1 and origin='user_apply'",[project]))[0].n,1);
+}
+console.log('PASS User Apply immutable basis: partial/uncertain/conflict persist; resume/reconcile preserves same request and basis, no second ChangeSet');
+
+const edited=[{path:'src/a.ts',content:'B'},{path:'package-lock.json',content:'{}'}];
+await call('ita_workspace_commit',[w.token,requested.id,JSON.stringify(edited),hash(edited)],['uuid','uuid','jsonb','text']);
+assert.equal((await read()).revision,2);
+assert.equal((await read()).build,null);assert.equal((await read()).verify,null);
+await call('ita_workspace_commit',[w.token,requested.id,JSON.stringify(edited),hash(edited)],['uuid','uuid','jsonb','text']);assert.equal((await read()).revision,2);
+for(const kind of ['build','verify']) await call('ita_workspace_evidence',[kind,JSON.stringify({workspace_revision:2,code_hash:hash(edited),basis_fingerprint:kind==='build'?b:v,status:'passed',result:{kind:'passed',items:[]}})],['text','jsonb']);
+const v2args=['edit-complete',2,hash(edited),b,v,plan,'user edit','https://fixture.test/'];
+const v2=await call('ita_complete_build_checkpoint',v2args,['text','bigint','text','text','text','uuid','text','text']);
+assert.equal(v2.version_number,2);
+const versionRow=(await svc('select * from public.ita_snapshots where id=$1',[v2.snapshot_id]))[0];
+assert.equal(versionRow.parent_checkpoint_id,done.snapshot_id);
+// Database-level parent identity cannot cross projects, including legacy parents.
+const foreignParent=(await db.query("insert into public.ita_snapshots(project_id,user_id,files,label) values($1,$2,'[]','foreign legacy') returning id",[legacyP,userId])).rows[0].id;
+await assert.rejects(db.query("insert into public.ita_snapshots(project_id,user_id,files,label,parent_checkpoint_id) values($1,$2,'[]','cross-project', $3)",[project,userId,foreignParent]),/ita_version_parent_fk|foreign key/);
+console.log('PASS App Version parent: same-project numbered and legacy accepted; cross-project parent rejected by composite FK');
+
+assert.equal((await call('ita_complete_build_checkpoint',v2args,['text','bigint','text','text','text','uuid','text','text'])).version_number,2);
+await assert.rejects(db.query("insert into public.ita_snapshots(project_id,user_id,files,label,kind,version_number) values($1,$2,'[]','duplicate','checkpoint',2)",[project,userId]),/unique/);
+await assert.rejects(as('authenticated',userId,'select public.ita_approve_plan($1,1)',[plan]),/not found/);
+
+
+ // Formal Plan approval still returns its agent task even when User Apply shares the same basis.
+ const formal=(await db.query("insert into public.ita_plans(project_id,user_id,version,kind,status,content) values($1,$2,2,'plan','draft',$3) returning id",[project,userId,JSON.stringify({acceptance:[{id:'A1',action:'view',expect:'B',external:false,steps:[{op:'expectText',selector:'main',contains:'B'}]}]})])).rows[0].id;
+ const approved=(await as('authenticated',userId,'select to_jsonb(public.ita_approve_plan($1,2)) t',[formal]))[0].t;
+ await svc("update public.ita_tasks set status='running',worker_id='w',execution_id=$1,lease_until=now()+interval '1 hour' where id=$2",[applyExec,approved.id]);scope[1]=approved.id;scope[3]=applyExec;
+ const formalArgs=['formal-complete',2,hash(edited),b,v,formal,'formal','https://fixture.test/'];
+ const formalCp=await call('ita_complete_build_checkpoint',formalArgs,['text','bigint','text','text','text','uuid','text','text']);
+ assert.equal(formalCp.version_number,3);
+ const repeated=await Promise.all([call('ita_complete_build_checkpoint',formalArgs,['text','bigint','text','text','text','uuid','text','text']),call('ita_complete_build_checkpoint',formalArgs,['text','bigint','text','text','text','uuid','text','text'])]);
+ assert.ok(repeated.every(x=>x.snapshot_id===formalCp.snapshot_id));
+ const nextReceipt=await submit('formal-edit',2,[{path:'src/a.ts',content:'C'}]);
+ assert.equal((await svc('select plan_id from public.ita_tasks where id=$1',[nextReceipt.task_id]))[0].plan_id,formal);
+ assert.equal((await as('authenticated',userId,'select (public.ita_approve_plan($1,2)).id id',[formal]))[0].id,approved.id);
+ await assert.rejects(as('authenticated',userId,'insert into public.ita_tasks(project_id,user_id,prompt,operation) values($1,$2,$3,$4)',[project,userId,'bypass','user_apply']),/permission/);
+ await assert.rejects(as('authenticated',userId,'select public.ita_retry_task($1,$2)',[nextReceipt.task_id,'new']),/RELOAD_REQUIRED/);
+ // Snapshot parent may be legacy; its original JSON is never modified or numbered.
+ const legacyParent=(await db.query("insert into public.ita_snapshots(project_id,user_id,files,label) values($1,$2,'[]','legacy parent') returning id",[legacyP,userId])).rows[0].id;
+ const oldLegacy=(await db.query('select to_jsonb(s) s from public.ita_snapshots s where id=$1',[legacyParent])).rows[0].s;
+ assert.equal(oldLegacy.version_number,null);
+
 await svc('delete from public.ita_projects where id=$1',[project]);
 assert.equal((await svc('select count(*)::int n from public.ita_changesets where project_id=$1',[project]))[0].n,0);
 // Service + real SQL + real Linux gateway. Build/preview/browser endpoints below are deliberate fakes.
@@ -231,10 +377,63 @@ try {
  at=0;deps.verifyApp=async()=>{throw new Error('must not re-verify');};
  const resume=await runBuild({...task2,tool_steps:0}, {},sb,'fixture','resume',deps,'',acceptance,{workspace:ws,buildBasis,verifyBasis});
  assert.equal(resume.verificationKind,'passed');assert.equal(expensive,0);
+
+ // Real local SQL + real gateway User Apply; build/browser endpoints remain explicit fixtures.
+ const {executeUserApply,userApplyBasis}=await import('../../worker/src/user-apply.js');
+ const {runDeterministicValidation}=await import('../../worker/src/agent.js');
+ const basisPlan=(await svc("insert into public.ita_plans(project_id,user_id,version,kind,status,content) values($1,$2,1,'action','approved',$3) returning *",[p2,userId,JSON.stringify({acceptance})]))[0];
+ await svc('update public.ita_tasks set plan_id=$1,plan_version=1 where id=$2',[basisPlan.id,t2]);
+ const cp=await ws.call('ita_complete_build_checkpoint',{p_key:'fixture-initial',p_revision:ws.state.revision,p_hash:ws.manifest.code_hash,p_build_basis:buildBasis,p_verify_basis:verifyBasis,p_basis_id:basisPlan.id,p_summary:'initial',p_preview_url:'https://fixture.test/'});
+ const edit=(await as('authenticated',userId,'select public.ita_submit_user_apply($1,$2,$3,$4) r',[p2,'fixture-user',ws.state.revision,JSON.stringify([{path:'a.ts',content:'USER'}])]))[0].r;
+ let userTask=(await svc('select * from public.ita_tasks where id=$1',[edit.task_id]))[0];const e5=randomUUID();
+ await svc("update public.ita_tasks set status='running',worker_id='w',execution_id=$1,lease_until=now()+interval '1 hour' where id=$2",[e5,userTask.id]);userTask.execution_id=e5;
+ ws=new Workspace({...args,taskId:userTask.id,executionId:e5});await ws.read();
+ let llmCalls=0,promotes=0;const originalGateway=ws.gateway.run.bind(ws.gateway);
+ ws.gateway.run=async(...a)=>{if(a[0]==='promote')promotes++;return originalGateway(...a);};
+ const loadChange=async()=>(await svc('select * from public.ita_changesets where id=$1',[edit.changeset_id]))[0];
+ const deterministicDeps={...deps,chat:()=>{llmCalls++;throw Error('No model allowed');},verifyApp:async()=>({base:{blocking:[],warnings:[]},checks:[{id:'A1',status:'pass'}]})};
+ const fixed={plan:basisPlan,acceptance,buildBasis,verifyBasis};
+ const executeEdit=()=>executeUserApply({task:userTask,workspace:ws,loadChange,validateBasis:async change=>{
+  assert.deepEqual(userApplyBasis(change),{checkpoint_id:cp.snapshot_id,basis_id:basisPlan.id,build_basis:buildBasis,verify_basis:verifyBasis});
+  return fixed;
+ },
+ validateAndComplete:()=>runDeterministicValidation(userTask,sb,'fixture',ws,fixed,deterministicDeps)});
+ await executeEdit();assert.equal(await fs.readFile(path.join(dir,'a.ts'),'utf8'),'USER');assert.equal(promotes,1);assert.equal(llmCalls,0);
+ // Model-free resume after committed mutation and controlled lockfile revision.
+ const nextRevision=ws.state.revision;
+ await svc("update public.ita_tasks set status='failed' where id=$1",[userTask.id]);
+ await as('authenticated',userId,'select public.ita_retry_task($1,$2)',[userTask.id,'resume']);
+ const e6=randomUUID();await svc("update public.ita_tasks set status='running',worker_id='w',execution_id=$1,lease_until=now()+interval '1 hour' where id=$2",[e6,userTask.id]);
+ userTask=(await svc('select * from public.ita_tasks where id=$1',[userTask.id]))[0];
+ ws=new Workspace({...args,taskId:userTask.id,executionId:e6});await ws.read();
+ ws.gateway.run=async(...a)=>{if(a[0]==='promote')promotes++;return originalGateway(...a);};
+ await executeEdit();assert.equal(ws.state.revision,nextRevision);assert.equal(promotes,1);assert.equal(llmCalls,0);
+ const newVersion=await ws.call('ita_complete_build_checkpoint',{p_key:'fixture-user-complete',p_revision:ws.state.revision,p_hash:ws.manifest.code_hash,p_build_basis:buildBasis,p_verify_basis:verifyBasis,p_basis_id:basisPlan.id,p_summary:'user edit',p_preview_url:'https://fixture.test/'});
+ assert.equal(newVersion.version_number,2);
+ assert.equal((await svc('select parent_checkpoint_id from public.ita_snapshots where id=$1',[newVersion.snapshot_id]))[0].parent_checkpoint_id,cp.snapshot_id);
+ // Retain confirmed edits on compile failure, never create a checkpoint or ask a model.
+ const broken=(await as('authenticated',userId,'select public.ita_submit_user_apply($1,$2,$3,$4) r',[p2,'fixture-broken',ws.state.revision,JSON.stringify([{path:'a.ts',content:'BROKEN'}])]))[0].r;
+ const brokenExec=randomUUID();userTask=(await svc('select * from public.ita_tasks where id=$1',[broken.task_id]))[0];
+ await svc("update public.ita_tasks set status='running',worker_id='w',execution_id=$1,lease_until=now()+interval '1 hour' where id=$2",[brokenExec,userTask.id]);
+ ws=new Workspace({...args,taskId:userTask.id,executionId:brokenExec});await ws.read();
+ const badChange=(await svc('select * from public.ita_changesets where id=$1',[broken.changeset_id]))[0];await ws.applyRequested(badChange);
+ const goodExec=sb.exec;sb.exec=async(id,cmd)=>cmd==='npm run --ignore-scripts build'?{exitCode:1,stdout:'compile error'}:goodExec(id,cmd);
+ await assert.rejects(runDeterministicValidation(userTask,sb,'fixture',ws,fixed,deterministicDeps),/VALIDATION_FAILED/);
+ assert.equal(ws.state.state,'confirmed');assert.equal(await fs.readFile(path.join(dir,'a.ts'),'utf8'),'BROKEN');
+ assert.equal((await svc('select checkpoint_id from public.ita_projects where id=$1',[p2]))[0].checkpoint_id,newVersion.snapshot_id);assert.equal(llmCalls,0);sb.exec=goodExec;
+ await svc("update public.ita_tasks set status='failed' where id=$1",[userTask.id]);
+ const repairReceipt=(await as('authenticated',userId,'select public.ita_submit_user_apply($1,$2,$3,$4) r',[p2,'manual-repair',ws.state.revision,JSON.stringify([{path:'a.ts',content:'REPAIRED'}])]))[0].r;
+ assert.ok(repairReceipt.task_id); // Old stable basis can regress a confirmed failed draft, without a model.
+ await svc("update public.ita_tasks set status='cancelled' where id=$1",[repairReceipt.task_id]);
+ assert.equal(await fs.readFile(path.join(dir,'a.ts'),'utf8'),'BROKEN'); // Queued repair did not mutate source.
+
+
+ await svc("update public.ita_tasks set status='running' where id=$1",[userTask.id]); // reactivate this local fixture for the following drift/lease assertion
  await assert.rejects(ws.runtime('build',async()=>{await fs.writeFile(path.join(dir,'a.ts'),'unexpected');return {exitCode:0};}),/未声明源码/);
  await ws.read();assert.equal(ws.state.state,'conflict');
  await assert.rejects(ws.apply([{operation:'write',path:'a.ts',content:'overwrite'}]),/REVISION_CONFLICT|BUSY|RECONCILE/);
  assert.equal(await fs.readFile(path.join(dir,'a.ts'),'utf8'),'unexpected');
+ console.log('PASS User Apply local service: real SQL + Linux gateway, exact source/actor, zero model calls, committed resume no rewrite, fixed-basis validation reuse, compile failure retains source/no checkpoint, manual repair accepts prior stable basis; build/browser endpoints are fixtures');
  console.log('PASS service bridge: real SQL/gateway mutations, no-op, delete, lockfile revision, install prepare/crash/new-execution recovery, third-hash service fence, partial takeover, materialization, Agent wiring and cross-execution evidence reuse; build/browser endpoints simulated');
 } finally {
  const {sha256}=await import('../../worker/src/managed-source.js');
@@ -243,4 +442,5 @@ try {
 }
 
 await db.close();
+console.log('PASS Demo SQL: numbered versions/legacy parent/immutable metadata/completion-key repeat/approval separation; User Apply ownership/active task+writer+preview/unresolved/idempotency/stale/input authority; preview revision receipt/cache invalidation (single-connection PGlite, not a dual-connection concurrency proof)');
 console.log('PASS workspace SQL: canonical hash, source privilege cutover, RLS, lease/epoch, partial recovery, no-op, stale conflict, evidence reuse, blocker/tool-error, immutable idempotent checkpoint, legacy multi-intent committed/not_applied exit, authority ACLs, third-hash rejection, completion identity, DELETE immutability, cascade (single-connection PGlite; not concurrency proof)');

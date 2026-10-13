@@ -2,7 +2,8 @@
  * Worker 运行期配置。全部来自环境变量,禁止硬编码密钥。
  * 启动时会自动加载 app/worker/.env(若存在)。
  */
-import './env.js';
+import { envFileExplicit } from './env.js';
+import { environmentProblems, assertKeyProject } from '../../shared/environment.js';
 import { providerProblems } from './llm-provider.js';
 
 // 缺失时不在导入阶段抛错,由 assertRunnable() 统一报告
@@ -11,6 +12,9 @@ const required = (name) => process.env[name] || '';
 const optional = (name, fallback = '') => process.env[name] || fallback;
 
 export const config = {
+  environmentId: required('FORGE_ENVIRONMENT_ID'),
+  expectedSupabaseProjectRef: required('EXPECTED_SUPABASE_PROJECT_REF'),
+  envFileExplicit,
   workerId: optional('WORKER_ID', `worker-${Math.random().toString(36).slice(2, 10)}`),
 
   // 服务端秘密配置(仅 Worker 可见,绝不进入前端构建)
@@ -24,6 +28,25 @@ export const config = {
   llmApiKey: optional('LLM_API_KEY'),
   llmJsonMode: optional('LLM_JSON_MODE'),
   llmTimeoutMs: Number(optional('LLM_TIMEOUT_MS', '120000')),
+  // Keep raw values for strict validation; unset caps preserve legacy requests.
+  llmMaxOutputTokens: optional('LLM_MAX_OUTPUT_TOKENS'),
+  llmMaxOutputTokensPlan: optional('LLM_MAX_OUTPUT_TOKENS_PLAN'),
+  llmMaxOutputTokensMemory: optional('LLM_MAX_OUTPUT_TOKENS_MEMORY'),
+  llmRequireOutputCap: optional('LLM_REQUIRE_OUTPUT_CAP'),
+  llmOmitTemperature: optional('LLM_OMIT_TEMPERATURE'),
+  llmReasoningEffortPlan: optional('LLM_REASONING_EFFORT_PLAN'),
+  llmReasoningEffortMemory: optional('LLM_REASONING_EFFORT_MEMORY'),
+  llmRequireReasoningPolicy: optional('LLM_REQUIRE_REASONING_POLICY'),
+  llmMaxOutputTokensBuild: optional('LLM_MAX_OUTPUT_TOKENS_BUILD'),
+  llmReasoningEffortBuild: optional('LLM_REASONING_EFFORT_BUILD'),
+  llmMaxOutputTokensDesign: optional('LLM_MAX_OUTPUT_TOKENS_DESIGN'),
+  llmReasoningEffortDesign: optional('LLM_REASONING_EFFORT_DESIGN'),
+  llmMaxOutputTokensActionPlan: optional('LLM_MAX_OUTPUT_TOKENS_ACTION_PLAN'),
+  llmReasoningEffortActionPlan: optional('LLM_REASONING_EFFORT_ACTION_PLAN'),
+  llmRequireCostBudget: optional('LLM_REQUIRE_COST_BUDGET'),
+  llmCostInputUsdPerMillion: optional('LLM_COST_INPUT_USD_PER_MILLION'),
+  llmCostOutputUsdPerMillion: optional('LLM_COST_OUTPUT_USD_PER_MILLION'),
+  llmMaxTheoreticalCostUsdPerExecution: optional('LLM_MAX_THEORETICAL_COST_USD_PER_EXECUTION'),
   llmDebugCaptureRequest: optional('LLM_DEBUG_CAPTURE_REQUEST', 'false') === 'true',
   planTemperature: optional('PLAN_TEMPERATURE') === '' ? null : Number(optional('PLAN_TEMPERATURE')),
   buildTemperature: optional('BUILD_TEMPERATURE') === '' ? null : Number(optional('BUILD_TEMPERATURE')),
@@ -84,12 +107,13 @@ export const config = {
 };
 
 export function assertRunnable() {
-  const problems = [];
+  const problems = environmentProblems({ environmentId: config.environmentId, expectedRef: config.expectedSupabaseProjectRef, supabaseUrl: config.supabaseUrl, explicit: config.envFileExplicit });
   for (const [name, value] of [['FUSION_MAX_FILES', config.fusionMaxFiles], ['FUSION_MAX_BYTES', config.fusionMaxBytes]]) {
     if (!Number.isInteger(value) || value < 1 || value > (name === 'FUSION_MAX_FILES' ? 32 : 1048576)) problems.push(name);
   }
   if (!config.supabaseUrl) problems.push('SUPABASE_URL');
   if (!config.supabaseServiceRoleKey) problems.push('SUPABASE_SERVICE_ROLE_KEY');
+  else try { assertKeyProject(config.supabaseServiceRoleKey,config.expectedSupabaseProjectRef); } catch(e) { problems.push(e.message); }
   problems.push(...providerProblems(config));
   if (!config.daytonaApiKey) problems.push('DAYTONA_API_KEY');
   return problems;

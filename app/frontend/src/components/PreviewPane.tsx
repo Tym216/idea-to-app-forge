@@ -14,8 +14,8 @@ const EMPTY_TEXT: Record<ViewState, { icon: typeof Monitor; title: string; body:
 };
 
 /** 真实预览:iframe 指向 Daytona 沙箱预览地址;无地址时按任务状态给出说明。 */
-export function PreviewPane({ url, state = 'empty', recovery, recoveryError, recoveryPending, onRecover }: {
-  url: string | null; state?: ViewState; recovery?: PreviewRecovery | null; recoveryError?: string;
+export function PreviewPane({ label, url, state = 'empty', recovery, recoveryError, recoveryPending, onRecover }: {
+  label?:string; url: string | null; state?: ViewState; recovery?: PreviewRecovery | null; recoveryError?: string;
   recoveryPending?: boolean; onRecover?: () => void;
 }) {
   const [nonce, setNonce] = useState(0);
@@ -49,7 +49,7 @@ export function PreviewPane({ url, state = 'empty', recovery, recoveryError, rec
   return (
     <div className="h-full flex flex-col min-h-0">
       <div className="h-9 px-3 flex items-center gap-2 border-b border-[var(--line)]">
-        {state === 'running' && <span className="text-[11px] text-[var(--accent)] shrink-0">构建中 · 显示上一版</span>}
+        <span className="text-[11px] text-[var(--accent)] shrink-0">{label ?? 'Working Workspace'}</span>
         <span className="flex-1 truncate font-mono text-[12px] text-[var(--text-2)]">{url}</span>
         <button type="button" aria-label="检查并刷新预览" onClick={() => onRecover ? onRecover() : setNonce((n) => n + 1)} className="btn-ghost grid h-7 w-7 place-items-center rounded-[6px]">
           <RotateCw className="h-3.5 w-3.5" />

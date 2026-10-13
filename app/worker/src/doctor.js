@@ -1,12 +1,14 @@
+import { assertWorkerEnvironment } from './environment.js';
 /**
  * Worker 启动前自检:npm run doctor
  * 只读检查,不领取任务、不创建沙箱;缺少配置时给出修复提示,不会崩溃。
  */
-import { envFileLoaded } from './env.js';
+import { envFileLoaded, envFilePath } from './env.js';
 import { createClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
 import { config } from './config.js';
-import { PROVIDERS, resolveProvider, buildRequestBody, requestHeaders, providerProblems } from './llm-provider.js';
+import { assertUnbudgetedOperatorInferenceAllowed } from './llm-cost-admission.js';
+import { PROVIDERS, resolveProvider, buildConfiguredRequestBody, requestHeaders, providerProblems } from './llm-provider.js';
 
 const env = (name) => (process.env[name] || '').trim();
 const mask = (value) => (!value ? '(空)' : value.length <= 8 ? '****' : `${value.slice(0, 4)}****${value.slice(-4)}`);
@@ -31,7 +33,7 @@ async function timedFetch(url, options = {}, ms = 20000) {
 
 function checkEnv() {
   console.log('\n[1/4] 环境变量');
-  console.log(envFileLoaded ? '   已加载 app/worker/.env' : '   未找到 app/worker/.env(将只读取进程环境变量)');
+  console.log(envFileLoaded ? '   已加载 '+envFilePath : '   未找到配置文件(将只读取进程环境变量)');
 
   const provider = config.llmProvider;
   for (const problem of providerProblems(config)) {
@@ -82,6 +84,7 @@ async function checkSupabase() {
   const key = env('SUPABASE_SERVICE_ROLE_KEY');
   if (!url || !key) return skip('缺少 SUPABASE_URL 或 SUPABASE_SERVICE_ROLE_KEY,跳过');
 
+  assertWorkerEnvironment();
   const admin = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false }, realtime: { transport: WebSocket } });
   const tables = ['ita_projects', 'ita_messages', 'ita_tasks', 'ita_files', 'ita_snapshots', 'ita_memories'];
   for (const table of tables) {
@@ -98,9 +101,9 @@ async function checkSupabase() {
   try {
     const { checkWorkspaceSchema } = await import('./supabase.js');
     await checkWorkspaceSchema(admin);
-    ok('Workspace 0006 字段与只读 RPC 自检通过（未领取任务）');
+    ok('Workspace/Demo 0006–0009 字段与只读 RPC 自检通过（未领取任务）');
   } catch (error) {
-    bad(String(error.message), '停止旧 Worker，依序执行 0001–0006；不要重跑旧迁移，核对 service_role 授权与 schema cache');
+    bad(String(error.message), '停止旧 Worker，依序执行 0001–0009；不要重跑旧迁移，核对 service_role 授权与 schema cache');
   }
 
   // 用随机 task_id 调用心跳:不会命中任何任务,只验证 service_role 的 EXECUTE 权限
@@ -127,10 +130,11 @@ async function checkLlm({ provider, llmKeyName }) {
 
   try {
     const started = performance.now();
+    assertUnbudgetedOperatorInferenceAllowed(config);
     const res = await timedFetch(url, {
       method: 'POST',
       headers: requestHeaders(selected.key),
-      body: JSON.stringify(buildRequestBody({ providerName: provider, model, messages: [{ role: 'user', content: '请简短回复 ok。' }], temperature: 0, json: false, upstream: config.openrouterUpstream })),
+      body: JSON.stringify(buildConfiguredRequestBody(config, 'doctor_probe', { providerName: provider, model, messages: [{ role: 'user', content: '请简短回复 ok。' }], temperature: 0, json: false, upstream: config.openrouterUpstream })),
     });
     const text = await res.text();
     if (!res.ok) {
@@ -174,6 +178,7 @@ async function checkDaytona() {
 
 async function main() {
   console.log('Forge Worker 自检');
+  assertWorkerEnvironment(); // shared runtime guard before any API/SDK work
   const llm = checkEnv();
   await checkSupabase();
   await checkLlm(llm);

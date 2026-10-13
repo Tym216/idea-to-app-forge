@@ -1,4 +1,8 @@
 import { config } from './config.js';
+import { resolveCostPolicy, assertCostExecution, estimateRequestCost, reserveRequestCost } from './llm-cost-admission.js';
+import { resolveOutputCap } from './llm-output-cap.js';
+import { resolveTemperatureOmission } from './llm-temperature.js';
+import { resolveReasoningPolicy } from './llm-reasoning-policy.js';
 import { requestDiagnostics, localRequestCapture } from './llm-diagnostics.js';
 import { beginModelTurn, beginModelRequest, measureContext } from './task-metrics.js';
 import { logger } from './logger.js';
@@ -77,6 +81,12 @@ export async function chat(messages, options = {}) {
 }
 
 export async function chatResponse(messages, { temperature = 0.2, json = false, taskId, purpose = 'unspecified', contextParts, reasoningMode = 'off', reasoningPolicy = 'best_effort', interactionMode = 'structured_text', captureFactory = localRequestCapture } = {}) {
+  assertExecutionActive();
+  const costPolicy = resolveCostPolicy(config);
+  assertCostExecution(costPolicy, taskId);
+  const outputBudget = resolveOutputCap(config, purpose);
+  const temperaturePolicy = resolveTemperatureOmission(config);
+  const trustedReasoningPolicy = resolveReasoningPolicy(config, purpose);
   await beforeModelCall();
   const provider = resolveProvider(config);
   if (provider.requiresKey && !provider.key) {
@@ -92,6 +102,9 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
   const nativeOptions = parseProviderOptions(rawOptions, `${stage?.toUpperCase() || 'LLM'}_PROVIDER_OPTIONS`);
   const { body, capability } = prepareRequest({
     reasoningMode, reasoningPolicy, interactionMode, reasoningProfile: config.llmReasoningProfile, nativeOptions,
+    ...outputBudget,
+    ...temperaturePolicy,
+    ...trustedReasoningPolicy,
     providerName: config.llmProvider,
     model: provider.model,
     messages,
@@ -105,7 +118,8 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
 
   // 调试开关打开时记录脱敏后的模型输入输出;默认只记录元数据与 usage。
   const traceInput = captureLlmMessages(messages);
-  const requestBody = JSON.stringify(body);
+  const requestBody = JSON.stringify(body); // Frozen bytes reused identically for every retry.
+  estimateRequestCost(costPolicy, requestBody, outputBudget.maxOutputTokens);
   await currentExecution()?.onModelEvent?.({ event: 'started', model: provider.model });
   assertExecutionActive();
   const logicalCallId = beginModelTurn();
@@ -121,11 +135,21 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
     async (obs) => {
       const started = performance.now();
       assertExecutionActive();
+      let costAdmission;
+      try {
+        // No awaits from admission through fetch: blocked attempts are not physical-request metrics.
+        costAdmission = reserveRequestCost(costPolicy, requestBody, outputBudget.maxOutputTokens, { taskId, purpose, attempt });
+      } catch (error) {
+        if (error.costAdmission) logger.warn('llm.cost_admission', error.costAdmission);
+        throw error;
+      }
+      if (costAdmission) logger.info('llm.cost_admission', costAdmission);
       const request = beginModelRequest({ provider: config.llmProvider, model: provider.model, purpose, contextChars });
       let status = 'failed';
       let recordedUsage;
       let failureCode;
       let usageBreakdown;
+      let providerReportedCostUsd = null;
       const diagnostic = requestDiagnostics({ requestId: request.requestId, logicalCallId, attempt,
         provider: provider.name, model: provider.model, purpose, timeoutMs: config.llmTimeoutMs ?? LLM_REQUEST_TIMEOUT_MS,
         messagesCount: messages.length, contextChars, requestBody, capability,
@@ -161,6 +185,9 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
         onBodyCompleted: () => diagnostic.bodyCompleted(),
         ...(capture.enabled ? { captureRaw: (raw) => capture.response(raw) } : {}) });
       diagnostic.complete(typeof payload === 'object' ? payload : null);
+      // Provider-reported actual cost is separate; it never refunds theoretical exposure.
+      if (typeof payload?.usage?.cost === 'number' && Number.isFinite(payload.usage.cost) && payload.usage.cost >= 0)
+        providerReportedCostUsd = payload.usage.cost;
       if (!response.ok) {
         const error = new Error(`LLM ${config.llmProvider} ${response.status}: ${payload.slice(0, 500)}`);
         error.code = 'LLM_HTTP';
@@ -236,15 +263,19 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
         const diagnostics = diagnostic.snapshot();
         logger.info('model.request', { task_id: taskId ?? null, execution_id: executionId,
           ...diagnostics, ...measured, ...debugPaths,
-          ...(usageBreakdown ? { usage_breakdown: usageBreakdown } : {}), failure_code: status === 'failed' ? failureCode : null });
+          ...(usageBreakdown ? { usage_breakdown: usageBreakdown } : {}),
+          ...(costAdmission ? { theoretical_cost_admission: costAdmission } : {}),
+          provider_reported_cost_usd: providerReportedCostUsd, failure_code: status === 'failed' ? failureCode : null });
         // Local paths/body capture never enter remote tracing; only safe lifecycle metadata does.
-        obs.update({ metadata: { ...diagnostics, request_status: status } });
+        obs.update({ metadata: { ...diagnostics, request_status: status,
+          provider_reported_cost_usd: providerReportedCostUsd,
+          ...(costAdmission ? { theoretical_cost_admission: costAdmission } : {}) } });
       }
     }
   ), {
     signal: currentExecution()?.signal,
     timeoutMs: config.llmTimeoutMs ?? LLM_REQUEST_TIMEOUT_MS,
-    beforeAttempt: async (attempt) => { if (attempt > 1) await beforeModelCall(); else assertExecutionActive(); },
+    beforeAttempt: async (attempt) => { if (attempt > 1 || costPolicy.required) await beforeModelCall(); else assertExecutionActive(); },
     onRetry: async (details) => {
       logger.warn('llm.retry_scheduled', { taskId, logical_call_id: logicalCallId, provider: config.llmProvider, model: provider.model, ...details });
       await currentExecution()?.onModelEvent?.({ event: 'retrying', model: provider.model, ...details });

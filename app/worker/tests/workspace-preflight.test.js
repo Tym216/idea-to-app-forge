@@ -12,6 +12,14 @@ test('migration preflight only reads schema and refuses missing RPC instead of c
  client.rpc=async()=>({error:{code:'PGRST202',message:'Could not find function'}});
  await assert.rejects(checkWorkspaceSchema(client),{code:'SUPABASE_STATE'});
 });
+test('schema preflight refuses missing immutable submission_basis before runtime can claim User Apply',async()=>{
+ let rpcCalls=0;
+ const client={from:table=>({select:columns=>({limit:async()=>({
+  error:table==='ita_changesets' && columns.includes('submission_basis') ? {code:'42703',message:'column submission_basis does not exist'} : null,
+ })})}),rpc:async()=>{rpcCalls++;throw Error('must not reach runtime');}};
+ await assert.rejects(checkWorkspaceSchema(client),{code:'SUPABASE_STATE'});
+ assert.equal(rpcCalls,0);
+});
 test('preview initialization cannot absorb/reconcile a paused source mutation',async()=>{
  const manifest=sourceManifest([]);let calls=0;
  const ws=new Workspace({projectId:'p',executionId:'preview',rpc:async(name)=>{calls++;assert.equal(name,'ita_workspace_read');return {data:{files:[],code_hash:manifest.code_hash,revision:0,state:'partial',writer:{kind:'mutation'},pending:[]},error:null};}});

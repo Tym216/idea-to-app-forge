@@ -1,3 +1,8 @@
+import { costPolicyProblems } from './llm-cost-admission.js';
+import { applyOutputCap, outputCapProblems, resolveOutputCap } from './llm-output-cap.js';
+import { parseOmitTemperature, resolveTemperatureOmission } from './llm-temperature.js';
+import { REASONING_EFFORTS, applyReasoningPolicy, reasoningPolicyProblems, resolveReasoningPolicy } from './llm-reasoning-policy.js';
+
 /** Chat Completions 供应商注册表；不加载 .env，不包含真实密钥。 */
 export const PROVIDERS = Object.freeze({
   deepseek: { prefix: 'DEEPSEEK', field: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', jsonMode: 'auto', help: 'https://platform.deepseek.com' },
@@ -30,7 +35,8 @@ export function requestHeaders(key) {
 export function providerProblems(settings) {
   const spec = PROVIDERS[settings.llmProvider];
   if (!spec) return [`LLM_PROVIDER（${Object.keys(PROVIDERS).join(' / ')}）`];
-  const missing = [];
+  const missing = [...outputCapProblems(settings), ...reasoningPolicyProblems(settings), ...costPolicyProblems(settings)];
+  try { resolveTemperatureOmission(settings); } catch (error) { missing.push(error.message); }
   if (!spec.keyOptional && !(settings.llmApiKey || settings[`${spec.field}ApiKey`])) missing.push(`${spec.prefix}_API_KEY 或 LLM_API_KEY`);
   if (!(settings.llmModel || settings[`${spec.field}Model`] || spec.model)?.trim()) missing.push(`${spec.prefix}_MODEL 或 LLM_MODEL`);
   try { resolveProvider(settings); } catch (error) { missing.push(error.message); }
@@ -76,7 +82,7 @@ export function resolveNativeOptions(providerName, model, options) {
       if (key === 'thinking' && ['enabled', 'disabled'].includes(value?.type)) supported = true;
       if (key === 'reasoning_effort' && ['low', 'high'].includes(value)) supported = true;
     } else if (providerName === 'openrouter') {
-      if (key === 'reasoning' && ['none', 'low', 'medium', 'high'].includes(value?.effort)) supported = true;
+      if (key === 'reasoning' && REASONING_EFFORTS.includes(value?.effort)) supported = true;
     } else if (providerName === 'gemini' && /^gemini-(2\.5|3)[.-]/.test(model)) {
       if (key === 'reasoning_effort' && ['none', 'low', 'medium', 'high'].includes(value)) supported = true;
     }
@@ -87,21 +93,37 @@ export function resolveNativeOptions(providerName, model, options) {
   return { parameters, warnings, omitTemperature, requestedReasoning: 'native', negotiatedReasoning: Object.keys(parameters).length ? 'native' : 'provider_default', effectiveReasoning: 'unconfirmed', downgradeReason: warnings.length ? warnings.join('; ') : null };
 }
 
-export function prepareRequest({ providerName, model, messages, temperature, json, jsonMode = 'auto', upstream = '', reasoningMode = 'off', reasoningPolicy = 'best_effort', interactionMode = 'structured_text', reasoningProfile = 'auto', nativeOptions = null }) {
+export function prepareRequest({ providerName, model, messages, temperature, json, jsonMode = 'auto', upstream = '', reasoningMode = 'off', reasoningPolicy = 'best_effort', interactionMode = 'structured_text', reasoningProfile = 'auto', nativeOptions = null, maxOutputTokens = null, requireOutputCap = false, outputCapSource = null, omitTemperature = false, trustedReasoningEffort = null, requireReasoningPolicy = false, reasoningPolicySource = null, reasoningPolicyPurpose = null }) {
   const capability = nativeOptions === null
     ? resolveCapabilities({ providerName, model, reasoningMode, reasoningPolicy, interactionMode, reasoningProfile })
     : resolveNativeOptions(providerName, model, parseProviderOptions(nativeOptions));
   if (!['structured_text', 'json_action'].includes(interactionMode)) throw capabilityError('当前仅支持 structured_text / json_action；native_tools 尚未接入执行循环');
   const body = buildCompatibleBody({ providerName, model, messages, temperature: capability.omitTemperature ? undefined : temperature, json, jsonMode, upstream });
   Object.assign(body, capability.parameters);
+  const trustedOmission = parseOmitTemperature(omitTemperature);
+  const temperatureOmitted = capability.omitTemperature || trustedOmission;
+  const temperatureOmitSource = capability.omitTemperature
+    ? (trustedOmission ? 'both' : 'provider_capability')
+    : (trustedOmission ? 'trusted_config' : null);
+  // Final invariant after native mapping: omission means the property does not exist.
+  if (temperatureOmitted) delete body.temperature;
+  const outputBudget = applyOutputCap(body, { providerName, maxOutputTokens, requireOutputCap });
+  const trustedReasoning = applyReasoningPolicy(body, { providerName, trustedReasoningEffort, requireReasoningPolicy });
   const jsonSent = Object.hasOwn(body, 'response_format');
   const warnings = [...capability.warnings];
+  if (trustedReasoningEffort != null) warnings.push('可信 reasoning policy 已覆盖 native options；已发送 effort=' + trustedReasoningEffort + '，上游实际执行仍需验证');
+  if (trustedOmission) warnings.push('LLM_OMIT_TEMPERATURE=true；最终请求已省略 temperature');
   if (json && jsonMode !== 'off' && !jsonSent) warnings.push(`${providerName}/${model} 的 JSON mode ${jsonMode} 未生效；仅使用提示词与解析校验`);
   if (capability.omitTemperature && temperature !== undefined && !warnings.some((warning) => warning.includes('temperature'))) warnings.push('该模型推理模式不支持 temperature；已省略');
-  return { body, capability: { ...capability, warnings, requestedJsonMode: jsonMode, effectiveJsonMode: jsonSent ? 'on' : 'off', requestedTemperature: temperature ?? null, sentTemperature: body.temperature ?? null } };
+  return { body, capability: { ...capability, ...outputBudget, ...trustedReasoning, trustedReasoningEffort, requireReasoningPolicy, reasoningPolicySource, reasoningPolicyPurpose, requestedMaxOutputTokens: maxOutputTokens, outputCapSource, requireOutputCap, warnings, requestedJsonMode: jsonMode, effectiveJsonMode: jsonSent ? 'on' : 'off', temperatureOmitted, temperatureOmitSource, requestedTemperature: temperature ?? null, sentTemperature: body.temperature ?? null } };
 }
 
 export function buildRequestBody(options) { return prepareRequest(options).body; }
+
+/** Diagnostic callers that do not use chat must still resolve the trusted runtime budget. */
+export function buildConfiguredRequestBody(settings, purpose, options) {
+  return prepareRequest({ ...options, ...resolveOutputCap(settings, purpose), ...resolveTemperatureOmission(settings), ...resolveReasoningPolicy(settings, purpose) }).body;
+}
 
 function buildCompatibleBody({ providerName, model, messages, temperature, json, jsonMode, upstream }) {
   return {

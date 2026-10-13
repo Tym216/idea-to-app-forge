@@ -28,7 +28,9 @@ export async function runSmoke() {
   try {
     provider = new DaytonaProvider();
     const started = Date.now();
-    ({ sandboxId } = await provider.create());
+    const projectId = process.env.SMOKE_PROJECT_ID, userId = process.env.SMOKE_USER_ID;
+    if (!projectId || !userId) throw new Error('Explicit SMOKE_PROJECT_ID / SMOKE_USER_ID required');
+    ({ sandboxId } = await provider.create({ projectId, userId }));
     ok(`创建测试沙箱 ${sandboxId}(${Date.now() - started}ms),工作目录 ${provider.workdir}`);
 
     const echo = await provider.exec(sandboxId, 'echo forge-smoke-ok', { timeoutMs: 60000 });

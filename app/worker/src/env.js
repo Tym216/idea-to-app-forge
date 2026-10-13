@@ -1,10 +1,15 @@
+import { assertEnvironment, assertKeyProject } from '../../shared/environment.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /** 若 app/worker/.env 存在则加载;已存在的进程环境变量优先,不覆盖。 */
-const envPath = fileURLToPath(new URL('../.env', import.meta.url));
+export const envFileExplicit = Boolean(process.env.FORGE_ENV_FILE);
+const envPath = process.env.FORGE_ENV_FILE || fileURLToPath(new URL('../.env', import.meta.url));
+if (process.env.FORGE_ENV_FILE && !existsSync(envPath)) throw new Error('ENVIRONMENT_ISOLATION: explicit env file missing');
+if (process.env.FORGE_ENVIRONMENT_ID === 'atoms-demo' && !envFileExplicit) throw new Error('ENVIRONMENT_ISOLATION: atoms-demo requires FORGE_ENV_FILE');
 
 export const envFileLoaded = existsSync(envPath);
+export const envFilePath = envPath;
 
 /** 仅两个 JSON options 允许跨行；在下一个环境变量前停止，不能吞掉密钥。 */
 export function parseEnvLines(source) {
@@ -35,7 +40,17 @@ export function parseEnvLines(source) {
 }
 
 if (envFileLoaded) {
-  for (const [key, value] of parseEnvLines(readFileSync(envPath, 'utf8'))) {
+  const pairs = parseEnvLines(readFileSync(envPath, 'utf8'));
+  const source = Object.fromEntries(pairs);
+  if ((process.env.FORGE_ENVIRONMENT_ID || source.FORGE_ENVIRONMENT_ID) === 'atoms-demo') {
+    if (!envFileExplicit || ['FORGE_ENVIRONMENT_ID','EXPECTED_SUPABASE_PROJECT_REF','SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY'].some(k=>!source[k]))
+      throw new Error('ENVIRONMENT_ISOLATION: demo env source must be complete; no fallback to ambient/Main .env');
+    assertEnvironment({environmentId:source.FORGE_ENVIRONMENT_ID,expectedRef:source.EXPECTED_SUPABASE_PROJECT_REF,supabaseUrl:source.SUPABASE_URL,explicit:true});
+    if(source.FORGE_ENVIRONMENT_ID!=='atoms-demo')throw new Error('ENVIRONMENT_ISOLATION: demo source profile mismatch; Main env fallback forbidden');
+    assertKeyProject(source.SUPABASE_SERVICE_ROLE_KEY,source.EXPECTED_SUPABASE_PROJECT_REF);
+
+  }
+  for (const [key, value] of pairs) {
     if (process.env[key] === undefined) process.env[key] = value;
   }
 }

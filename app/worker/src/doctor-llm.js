@@ -1,5 +1,9 @@
 /** Read-only LLM preflight: configuration, request mapping, and optional GET /models. */
 import { config } from './config.js';
+import { resolveOutputCap } from './llm-output-cap.js';
+import { describeCostPolicy, resolveCostPolicy, estimateRequestCost } from './llm-cost-admission.js';
+import { resolveTemperatureOmission } from './llm-temperature.js';
+import { resolveReasoningPolicy } from './llm-reasoning-policy.js';
 import { providerProblems, resolveProvider, prepareRequest, parseProviderOptions, requestHeaders } from './llm-provider.js';
 
 export function describeLlm(settings) {
@@ -11,21 +15,51 @@ export function describeLlm(settings) {
     ['plan', settings.planTemperature ?? 0.3, settings.planProviderOptionsRaw, settings.planReasoningMode || 'off', settings.planReasoningPolicy || 'best_effort'],
     ['build', settings.buildTemperature ?? 0.1, settings.buildProviderOptionsRaw, 'off', 'best_effort'],
   ]) {
+    let trustedPolicy, outputBudget, capBlock = null;
+    try {
+      trustedPolicy = resolveReasoningPolicy(settings, stage === 'plan' ? 'plan' : 'build_decision');
+    }
+    catch (error) {
+      if (!['LLM_REASONING_POLICY_REQUIRED', 'LLM_OUTPUT_CAP_REQUIRED'].includes(error.code)) throw error;
+      stages[stage] = { inferenceBlocked: true, code: error.code, warnings: [error.message] };
+      continue;
+    }
+    try { outputBudget = resolveOutputCap(settings, stage === 'plan' ? 'plan' : 'build_decision'); }
+    catch (error) {
+      if (error.code !== 'LLM_OUTPUT_CAP_REQUIRED') throw error;
+      capBlock = error;
+      // Pure projection only: still show temperature/capability diagnostics for a blocked stage.
+      outputBudget = resolveOutputCap({ ...settings, llmRequireOutputCap: false }, stage === 'plan' ? 'plan' : 'build_decision');
+    }
     const { body, capability } = prepareRequest({ providerName: selected.name, model: selected.model,
+      ...resolveTemperatureOmission(settings), ...trustedPolicy, ...outputBudget,
       messages: [], temperature, json: true, jsonMode: selected.jsonMode,
       reasoningMode, reasoningPolicy, reasoningProfile: settings.llmReasoningProfile || 'auto',
       nativeOptions: parseProviderOptions(rawOptions, `${stage.toUpperCase()}_PROVIDER_OPTIONS`),
       interactionMode: stage === 'plan' ? 'structured_text' : 'json_action', upstream: settings.openrouterUpstream || '' });
-    stages[stage] = { requestedTemperature: temperature, sentTemperature: body.temperature ?? null,
+    const costPolicy = resolveCostPolicy(settings);
+    if (costPolicy.required && outputBudget.maxOutputTokens == null && !capBlock)
+      capBlock = { code: 'LLM_COST_OUTPUT_CAP_REQUIRED' };
+    const theoreticalProjection = outputBudget.maxOutputTokens == null ? null
+      : estimateRequestCost(costPolicy, JSON.stringify(body), outputBudget.maxOutputTokens);
+    stages[stage] = { ...(capBlock ? { inferenceBlocked: true, code: capBlock.code } : {}), outputCap: body.max_tokens ?? null, outputCapSource: outputBudget.outputCapSource,
+      theoreticalProjection: theoreticalProjection?.diagnostics ?? null,
+      requestedTemperature: temperature, sentTemperature: body.temperature ?? null,
+      temperatureOmitted: capability.temperatureOmitted, temperatureOmitSource: capability.temperatureOmitSource,
       requestedJsonMode: selected.jsonMode, effectiveJsonMode: capability.effectiveJsonMode,
       requestedReasoning: capability.requestedReasoning, effectiveReasoning: capability.effectiveReasoning,
       negotiatedReasoning: capability.negotiatedReasoning,
+      trustedReasoningEffort: capability.trustedReasoningEffort,
+      effectiveReasoningEffort: capability.effectiveReasoningEffort ?? null,
+      reasoningPolicySource: capability.reasoningPolicySource,
+      reasoningPolicyPurpose: capability.reasoningPolicyPurpose,
+      requireReasoningPolicy: capability.requireReasoningPolicy,
       reasoningStatus: capability.downgradeReason ? 'unsupported' : capability.effectiveReasoning === 'unconfirmed' ? 'unknown' : 'supported',
       jsonStatus: selected.jsonMode === 'on' && !Object.hasOwn(body, 'response_format') ? 'unsupported'
         : Object.hasOwn(body, 'response_format') && selected.name === 'deepseek' ? 'supported' : 'unknown',
-      temperatureStatus: body.temperature == null ? 'unsupported' : 'unknown', warnings: capability.warnings };
+      temperatureStatus: ['trusted_config', 'both'].includes(capability.temperatureOmitSource) ? 'omitted_by_config' : body.temperature == null ? 'unsupported' : 'unknown', warnings: capability.warnings };
   }
-  return { problems: [], selected, stages };
+  return { problems: [], selected, stages, cost: describeCostPolicy(settings) };
 }
 
 export async function inspectModelList(selected, fetchImpl = fetch) {
@@ -53,7 +87,14 @@ async function main() {
     return;
   }
   console.log(`provider: ${report.selected.name}; model: ${report.selected.model}; base URL: ${report.selected.baseUrl}`);
+  console.log('theoretical cost configuration (no task ledger allocated): ' + JSON.stringify(report.cost));
   for (const [stage, value] of Object.entries(report.stages)) {
+    if (value.inferenceBlocked) {
+      console.log(stage + ': inference blocked (' + value.code + ')');
+      continue;
+    }
+    console.log(stage + ': trusted output cap=' + (value.outputCap ?? 'unset') + '; source=' + (value.outputCapSource ?? 'none'));
+    if (value.trustedReasoningEffort != null) console.log(stage + ': trusted reasoning ' + value.trustedReasoningEffort + ' → ' + value.effectiveReasoningEffort + ' (request only, upstream unverified); source=' + value.reasoningPolicySource + '; required=' + value.requireReasoningPolicy);
     console.log(`${stage}: temperature ${value.requestedTemperature} → ${value.sentTemperature ?? 'provider default'} (${value.temperatureStatus}); JSON ${value.requestedJsonMode} → ${value.effectiveJsonMode} (${value.jsonStatus}); reasoning ${value.requestedReasoning} → ${value.negotiatedReasoning} (${value.reasoningStatus})`);
     value.warnings.forEach((warning) => console.log(`  ⚠ ${warning}`));
   }

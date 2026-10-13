@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Code2, Download, FileText, Monitor, PanelLeftClose, PanelLeftOpen, Send } from 'lucide-react';
-import type { Message, Plan, PlanFeedback, PreviewRecovery, Project, ProjectFile, Task } from '@/lib/supabase';
+import { activeTask, defaultMode, stableWorkspace, readyPreview } from '@/lib/workspaceState';
+import { VersionsPanel } from './VersionsPanel';
+import type { ApplyReceipt, EditSubmission } from './CodeExplorer';
+import type { AppVersion, Message, Plan, PlanFeedback, PreviewRecovery, Project, ProjectFile, Task } from '@/lib/supabase';
 import { approvePlan, retryTask, revisePlan } from '@/lib/data';
 import { splitTasks, viewState } from '@/lib/taskView';
 import { TaskPanel } from './TaskPanel';
@@ -9,7 +12,7 @@ import { CodeExplorer } from './CodeExplorer';
 import { PreviewPane } from './PreviewPane';
 
 export type Mode = 'plan' | 'build';
-type Tab = 'plan' | 'preview' | 'code';
+type Tab = 'plan' | 'preview' | 'code' | 'versions';
 
 export type WorkspaceActions = {
   approve: typeof approvePlan;
@@ -19,6 +22,8 @@ export type WorkspaceActions = {
 
 type Props = {
   project: Project | null;
+  versions?:AppVersion[];
+  onApply?:(input:EditSubmission)=>Promise<ApplyReceipt>;
   messages: Message[];
   files: ProjectFile[];
   tasks: Task[];
@@ -41,6 +46,7 @@ const TABS: { key: Tab; label: string; icon: typeof FileText }[] = [
   { key: 'plan', label: '计划', icon: FileText },
   { key: 'preview', label: '预览', icon: Monitor },
   { key: 'code', label: '代码', icon: Code2 },
+  { key: 'versions', label: 'App Versions', icon: FileText },
 ];
 
 /**
@@ -53,7 +59,10 @@ export function WorkspaceView(props: Props) {
   const { current, history } = splitTasks(tasks);
   const state = viewState(current);
   const busy = state === 'waiting' || state === 'running' || state === 'paused';
-  const [mode, setMode] = useState<Mode>('plan');
+  const [modeChoice,setModeChoice]=useState<Mode|null>(null);
+  const mode=modeChoice ?? defaultMode(project);
+  const versions=props.versions ?? [];
+  const workingDraft=!stableWorkspace(project,versions.find(v=>v.id===project?.checkpoint_id)) || activeTask(tasks);
   const [prompt, setPrompt] = useState('');
   const [sending, setSending] = useState(false);
   const [sideOpen, setSideOpen] = useState(true);
@@ -113,7 +122,7 @@ export function WorkspaceView(props: Props) {
           className="btn-ghost h-8 px-3 rounded-[6px] text-[12px] flex items-center gap-1.5"
         >
           <Download className="h-3.5 w-3.5" aria-hidden />
-          <span className="hidden sm:inline">导出源码</span>
+          <span className="hidden sm:inline">导出工作区源码</span>
         </button>
       </header>
 
@@ -139,6 +148,7 @@ export function WorkspaceView(props: Props) {
                       {round && m.task_id !== current?.id && (
                         <span className="block text-[11px] text-[var(--text-2)]">第 {round} 轮{isErr ? ' · 历史失败' : ''}</span>
                       )}
+                      {typeof m.meta?.versionNumber === 'number' && <span className="block font-medium">App v{m.meta.versionNumber} 已生成</span>}
                       {m.content}
                     </div>
                   );
@@ -156,7 +166,7 @@ export function WorkspaceView(props: Props) {
                     type="button"
                     role="radio"
                     aria-checked={mode === m}
-                    onClick={() => setMode(m)}
+                    onClick={() => setModeChoice(m)}
                     className={`h-7 px-3 rounded-[6px] text-[12px] border ${
                       mode === m ? 'border-[var(--accent)] text-[var(--accent)] bg-[#EEEEFB] font-medium' : 'border-[var(--line)] text-[var(--text-2)]'
                     }`}
@@ -218,10 +228,14 @@ export function WorkspaceView(props: Props) {
           </div>
           <div className="flex-1 min-h-0 bg-[var(--panel)]">
             {tab === 'plan' && <PlanPanel plans={plans} feedback={feedback} busy={busy} onChanged={onChanged} actions={actions} />}
-            {tab === 'preview' && <PreviewPane url={project?.preview_url ?? null} state={state}
+            {tab === 'preview' && <PreviewPane label={workingDraft ? 'Working Workspace · 正在处理或有未发布修改' : 'Working Workspace · 检查时对应 App v'+versions.find(v=>v.id===project?.checkpoint_id)?.version_number} url={readyPreview(project,props.recovery) ? props.recovery?.preview_url ?? null : null} state={state}
               recovery={props.recovery?.sandbox_id === project?.sandbox_id && props.recovery?.project_id === project?.id ? props.recovery : null}
               recoveryError={props.recoveryError} recoveryPending={props.recoveryPending} onRecover={props.onRecoverPreview} />}
-            {tab === 'code' && <CodeExplorer files={files} />}
+            <div className={tab==='code' ? 'h-full' : 'hidden'}><CodeExplorer files={files} readonly={!props.onApply}
+              revision={project?.workspace_revision ?? 0} task={current ?? undefined}
+              blocked={activeTask(tasks) || project?.workspace_state!=='confirmed' || !!project?.workspace_writer || !!props.recoveryPending || ['queued','running'].includes(props.recovery?.status ?? '')}
+              onApply={props.onApply}/></div>
+            {tab === 'versions' && <VersionsPanel versions={versions} currentId={project?.checkpoint_id} workingDraft={workingDraft}/>}
           </div>
         </main>
       </div>

@@ -1,3 +1,4 @@
+import { PERSISTENCE_GUIDANCE } from './app-persistence.js';
 import { parseJson } from './llm.js';
 import { PLAN_CHECKS_SPEC, validateChecks } from './verify.js';
 
@@ -20,7 +21,8 @@ const ACCEPTANCE_RULES = `验收条件 acceptance 规则:
 - 条目必须能在浏览器中验证,id 依次为 A1、A2…
 - 验收一旦批准，Build 只能执行其中的 steps；不能重新编写或放宽检查。`;
 
-export const PLAN_PROMPT = `你是资深产品工程师。根据用户需求输出实现计划,只输出一个 JSON 对象:
+export const PLAN_PROMPT = `${PERSISTENCE_GUIDANCE}
+你是资深产品工程师。根据用户需求输出实现计划,只输出一个 JSON 对象:
 {"understanding":"一段话复述需求","scope":["功能点"],"flows":["核心用户流程,一步一句"],"rules":["关键交互规则"],
  "storage":"数据保存方式一句话(例如 仅内存 / localStorage / 用户要求的后端)","steps":["实现步骤"],"design":"设计方向一句话",
  "acceptance":[{"id":"A1","action":"操作","expect":"预期结果","external":false,"severity":"core","steps":[{"op":"expectText","selector":"main","contains":"预期内容"}]}],
@@ -32,7 +34,8 @@ export const PLAN_PROMPT = `你是资深产品工程师。根据用户需求输�
 ${ACCEPTANCE_RULES}
 ${PLAN_CHECKS_SPEC}`;
 
-export const ACTION_PROMPT = `你将直接执行构建。用 JSON 输出简短行动计划,只输出 JSON:
+export const ACTION_PROMPT = `${PERSISTENCE_GUIDANCE}
+你将直接执行构建。用 JSON 输出简短行动计划,只输出 JSON:
 {"understanding":"一句话","steps":["1-6 个简短步骤"],"acceptance":[{"id":"A1","action":"操作","expect":"预期结果","external":false,"severity":"core","steps":[{"op":"expectText","selector":"main","contains":"预期内容"}]}]}
 ${ACCEPTANCE_RULES}
 ${PLAN_CHECKS_SPEC}`;

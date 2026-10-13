@@ -1,5 +1,6 @@
 import { Daytona } from '@daytona/sdk';
 import { config } from '../config.js';
+import { assertWorkerEnvironment } from '../environment.js';
 import { logger } from '../logger.js';
 
 /**
@@ -14,24 +15,57 @@ const APP_DIR = 'app';
 const DEV_SESSION = 'forge-dev';
 
 export class DaytonaProvider {
-  constructor() {
-    if (!config.daytonaApiKey) {
-      throw new Error('DAYTONA_API_KEY 未配置,无法使用 Daytona 执行环境。');
-    }
-    this.client = new Daytona({
-      apiKey: config.daytonaApiKey,
-      apiUrl: config.daytonaApiUrl,
-      target: config.daytonaTarget,
+  #rawClient;
+  constructor({ client, settings = config } = {}) {
+    this.settings = settings;
+    this.identity = assertWorkerEnvironment(settings);
+    if (!client && !settings.daytonaApiKey) throw new Error('DAYTONA_API_KEY 未配置');
+    this.#rawClient = client || new Daytona({ apiKey: settings.daytonaApiKey, apiUrl: settings.daytonaApiUrl, target: settings.daytonaTarget });
+    this.owners = new Map();
+    // Only guarded exits are exposed, including preview/deletion paths.
+    this.client = Object.freeze({
+      get: (id) => this.getOwned(id),
+      start: async (sb, ...args) => { const current = await this.getOwned(sb.id); return this.#rawClient.start(current, ...args); },
+      delete: async (sb, ...args) => { const current = await this.getOwned(sb.id); return this.#rawClient.delete(current, ...args); },
     });
-    this.cache = new Map(); // sandboxId -> { sandbox, workdir }
-    this.workdir = `~/${APP_DIR}`;
+    this.cache = new Map();
+    this.workdir = '~/' + APP_DIR;
   }
-
+  /** Expected ownership comes from the caller's trusted task/DB context, never labels. */
+  bindOwner(id, owner) {
+    assertExpectedOwner(owner);
+    if (!id) throw ownershipError('explicit sandbox ID required');
+    const prior = this.owners.get(id);
+    if (prior && (prior.projectId !== owner.projectId || prior.userId !== owner.userId))
+      throw ownershipError('conflicting owner');
+    this.owners.set(id, { projectId: owner.projectId, userId: owner.userId });
+  }
+  expectedOwner(id) {
+    const owner = this.owners.get(id);
+    assertExpectedOwner(owner); // reject before even requesting project-specific metadata
+    return owner;
+  }
+  assertOwned(sb) { return assertSandboxOwner(sb, this.identity, this.expectedOwner(sb?.id)); }
+  async getOwned(id) {
+    const owner = this.expectedOwner(id);
+    let sb;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { sb = await this.#rawClient.get(id); break; }
+      catch (e) {
+        const status = Number(e?.statusCode ?? e?.status ?? e?.response?.status);
+        if (attempt || !(status === 502 || status === 503 || (!status && /network|fetch failed|ECONNRESET|timeout/i.test(e?.message || '')))) throw e;
+        await new Promise(r => setTimeout(r, 250)); // metadata GET only; never replay mutations
+      }
+    }
+    if (sb.id !== id) throw ownershipError('metadata returned a different sandbox');
+    assertSandboxOwner(sb, this.identity, owner);
+    return sb;
+  }
   /** 获取沙箱对象及其绝对工作目录(不同镜像的 home 不同,运行时解析)。 */
   async resolve(sandboxId) {
+    const sandbox = await this.client.get(sandboxId); // fresh ownership check even on a cache hit
     const cached = this.cache.get(sandboxId);
-    if (cached) return cached;
-    const sandbox = await this.client.get(sandboxId);
+    if (cached) return { ...cached, sandbox };
     const home = (await sandbox.process.executeCommand('printf %s "$HOME"', undefined, undefined, 30)).result.trim();
     const workdir = `${home || '/home/daytona'}/${APP_DIR}`;
     await sandbox.process.executeCommand(`mkdir -p ${JSON.stringify(workdir)}`, undefined, undefined, 30);
@@ -47,17 +81,20 @@ export class DaytonaProvider {
     return clean ? `${workdir}/${clean}` : workdir;
   }
 
-  /** owner: { projectId, userId } 写入标签,用于孤儿沙箱核对(仅凭标签判断归属,不凭创建时间)。 */
+  /** owner: { projectId, userId } 写入标签,用于元数据核对；标签必须与 caller 的可信 owner 一致。 */
   async create(owner = {}) {
-    const sandbox = await this.client.create(
+    assertExpectedOwner(owner);
+    const sandbox = await this.#rawClient.create(
       {
         language: 'typescript',
-        autoStopInterval: config.daytonaAutoStopMinutes,
-        labels: sandboxLabels(owner),
-        ...(config.daytonaSnapshot ? { snapshot: config.daytonaSnapshot } : {}),
+        autoStopInterval: this.settings.daytonaAutoStopMinutes,
+        labels: sandboxLabels(owner, this.identity),
+        ...(this.settings.daytonaSnapshot ? { snapshot: this.settings.daytonaSnapshot } : {}),
       },
       { timeout: 180 }
     );
+    this.bindOwner(sandbox.id, owner);
+    this.assertOwned(sandbox);
     logger.info('daytona.created', { sandboxId: sandbox.id });
     this.cache.delete(sandbox.id);
     await this.resolve(sandbox.id);
@@ -65,8 +102,10 @@ export class DaytonaProvider {
   }
 
   /** 沙箱可能已停止或被回收:停止则启动,不存在则重建。 */
-  async ensure(sandboxId, owner = {}) {
+  async ensure(sandboxId, owner) {
     if (!sandboxId) return { ...(await this.create(owner)), alive: false };
+    if (owner !== undefined) this.bindOwner(sandboxId, owner);
+    const expected = this.expectedOwner(sandboxId);
     try {
       const sandbox = await this.client.get(sandboxId);
       const state = String(sandbox.state || '').toLowerCase();
@@ -78,17 +117,18 @@ export class DaytonaProvider {
       await this.resolve(sandboxId);
       return { sandboxId, alive: true };
     } catch (error) {
-      if (!isNotFound(error) || owner.allowRecreate === false) throw error;
+      if (!isNotFound(error) || owner?.allowRecreate === false) throw error;
       logger.warn('daytona.ensure.recreate', { sandboxId, error: String(error?.message || error) });
-      return { ...(await this.create(owner)), alive: false };
+      return { ...(await this.create(expected)), alive: false };
     }
   }
 
   /** 新建、恢复与打开已有项目使用相同的闲置停止策略；不设置永久保活。 */
   async configureIdle(sandbox) {
-    const minutes = config.daytonaAutoStopMinutes;
+    const current = await this.getOwned(sandbox.id);
+    const minutes = this.settings.daytonaAutoStopMinutes;
     if (!Number.isInteger(minutes) || minutes < 1) throw new Error('DAYTONA_AUTO_STOP_MINUTES 必须是正整数');
-    if (sandbox.autoStopInterval !== minutes) await sandbox.setAutostopInterval(minutes);
+    if (current.autoStopInterval !== minutes) await current.setAutostopInterval(minutes);
   }
 
   /**
@@ -162,7 +202,7 @@ export class DaytonaProvider {
   }
 
   async readLogs(sandboxId, { sessionId = DEV_SESSION, commandId } = {}) {
-    if (!commandId) return '';
+    if (!commandId) { await this.getOwned(sandboxId); return ''; }
     const { sandbox } = await this.resolve(sandboxId);
     const logs = await sandbox.process.getSessionCommandLogs(sessionId, commandId);
     return [logs?.stdout || logs?.output || '', logs?.stderr || ''].filter(Boolean).join('\n');
@@ -209,7 +249,8 @@ export class DaytonaProvider {
   }
 
   /** 只删除指定 ID 的沙箱;不存在视为已清理,返回 { existed:false }。其他错误原样抛出。 */
-  async destroy(sandboxId) {
+  async destroy(sandboxId, owner) {
+    if (owner !== undefined) this.bindOwner(sandboxId, owner);
     let sandbox;
     try {
       sandbox = await this.client.get(sandboxId);
@@ -229,15 +270,39 @@ export class DaytonaProvider {
   /** 列出本平台沙箱(仅供管理员核对)。 */
   async list() {
     const out = [];
-    for await (const sb of this.client.list({ labels: { app: 'forge' } })) {
+    for await (const sb of this.#rawClient.list({ labels: { app: 'forge', environment_id: this.identity.environmentId, supabase_project_ref: this.identity.projectRef } })) {
+      assertSandboxEnvironment(sb, this.identity); // listing conveys no project mutation authority
       out.push({ id: sb.id, labels: sb.labels || {}, state: sb.state, createdAt: sb.createdAt });
     }
     return out;
   }
 }
 
-export function sandboxLabels({ projectId, userId } = {}) {
-  return { app: 'forge', ...(projectId ? { forge_project_id: projectId } : {}), ...(userId ? { forge_user_id: userId } : {}) };
+export function sandboxLabels({ projectId, userId } = {}, identity = {}) {
+  return { app: 'forge', environment_id: identity.environmentId, supabase_project_ref: identity.projectRef,
+    forge_project_id: projectId, user_id: userId, forge_user_id: userId };
+}
+function ownershipError(reason) {
+  const e = new Error('SANDBOX_OWNERSHIP: ' + reason + '; no side effect permitted');
+  e.code = 'SANDBOX_OWNERSHIP';
+  return e;
+}
+function assertExpectedOwner(owner) {
+  if (!owner || !['projectId', 'userId'].every(key => typeof owner[key] === 'string' && owner[key].trim()))
+    throw ownershipError('explicit project/user required from trusted context');
+}
+function assertSandboxEnvironment(sb, identity) {
+  const labels = sb?.labels || {};
+  if (labels.app !== 'forge' || labels.environment_id !== identity.environmentId || labels.supabase_project_ref !== identity.projectRef
+    || !labels.forge_project_id || !labels.user_id) throw ownershipError('foreign or unlabelled sandbox');
+  return sb;
+}
+export function assertSandboxOwner(sb, identity, owner) {
+  assertExpectedOwner(owner);
+  assertSandboxEnvironment(sb, identity);
+  if (sb.labels.forge_project_id !== owner.projectId || sb.labels.user_id !== owner.userId)
+    throw ownershipError('mismatched project/user');
+  return sb;
 }
 
 export function isNotFound(error) {

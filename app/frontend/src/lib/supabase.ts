@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { assertEnvironment, assertKeyProject } from '../../../shared/environment.js';
 
 /**
  * 前端只使用「公开配置」:Project URL + anon key。
@@ -8,11 +9,15 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
+assertEnvironment({ environmentId: import.meta.env.VITE_FORGE_ENVIRONMENT_ID, expectedRef: import.meta.env.VITE_EXPECTED_SUPABASE_PROJECT_REF, supabaseUrl });
+assertKeyProject(supabaseAnonKey,import.meta.env.VITE_EXPECTED_SUPABASE_PROJECT_REF);
+if (!supabaseAnonKey || /placeholder/i.test(supabaseAnonKey)) throw new Error('ENVIRONMENT_ISOLATION: explicit public API key required');
+
 export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
 
 export const supabase = createClient(
-  supabaseUrl || 'https://placeholder.supabase.co',
-  supabaseAnonKey || 'placeholder-anon-key'
+  supabaseUrl!,
+  supabaseAnonKey!
 );
 
 export type PreviewRecovery = {
@@ -20,6 +25,8 @@ export type PreviewRecovery = {
   sandbox_id: string;
   status: 'queued' | 'running' | 'ready' | 'failed';
   phase: string;
+  ready_revision?: number;
+  ready_hash?: string;
   execution_id: string | null;
   preview_url: string | null;
   error: string | null;
@@ -27,6 +34,11 @@ export type PreviewRecovery = {
 };
 
 export type Project = {
+  checkpoint_id?: string | null;
+  workspace_revision?: number;
+  workspace_hash?: string | null;
+  workspace_state?: string;
+  workspace_writer?: unknown;
   id: string;
   user_id: string;
   name: string;
@@ -89,6 +101,8 @@ export type PlanFeedback = {
 };
 
 export type Task = {
+  operation?: 'agent' | 'user_apply';
+  requested_changeset_id?: string;
   id: string;
   project_id: string;
   mode: 'plan' | 'build';
@@ -134,3 +148,9 @@ export type Memory = {
 export type MemorySuggestion = { id: string; key: string; value: string; status: string; created_at: string };
 export type FeedbackCategory = 'missing_feature' | 'preview_broken' | 'stuck' | 'design_mismatch' | 'other';
 export type TaskFeedback = { id: string; task_id: string; execution_id: string | null; category: FeedbackCategory; note: string; created_at: string };
+
+export type AppVersion = {
+ id:string; project_id:string; version_number:number; parent_checkpoint_id:string|null;
+ label:string; created_at:string; workspace_revision:number; code_hash:string; basis_id:string;
+ verify_evidence: {status:string}; files?: {path:string;content:string}[];
+};

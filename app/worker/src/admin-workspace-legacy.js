@@ -10,10 +10,13 @@ if (!args.includes('--project') || !args.includes('--sandbox') || !args.includes
 const { admin } = await import('./supabase.js');
 const { getSandboxProvider } = await import('./sandbox/index.js');
 const projectId = value('--project'), sandboxId = value('--sandbox');
-const { data: p, error } = await admin.from('ita_projects').select('id,workspace_writer').eq('id', projectId).single();
+const { data: p, error } = await admin.from('ita_projects').select('id,user_id,sandbox_id,workspace_writer').eq('id', projectId).single();
 if (error) throw new Error(`读取 legacy authority 失败：${error.message}`);
 if (p.workspace_writer?.kind !== 'legacy') throw new Error('项目没有 retained legacy writer；未修改');
-const gateway = new SandboxWorkspace(getSandboxProvider('daytona'), sandboxId);
+if (p.sandbox_id !== sandboxId || p.workspace_writer.sandbox_id !== sandboxId) throw new Error('SANDBOX_OWNERSHIP: original sandbox does not match DB authority');
+const provider = getSandboxProvider('daytona');
+provider.bindOwner(sandboxId, { projectId: p.id, userId: p.user_id });
+const gateway = new SandboxWorkspace(provider, sandboxId);
 const actual = await gateway.scan();
 const result = await admin.rpc('ita_workspace_reconcile_legacy', {
   p_project_id: projectId, p_old_token: p.workspace_writer.token, p_sandbox_id: sandboxId,

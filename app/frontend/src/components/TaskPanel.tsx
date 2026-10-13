@@ -178,12 +178,12 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
             {!verifyLimitReached && <button type="button" disabled={pending} onClick={() => retry('resume')} className="btn-ghost h-8 px-3 rounded-[6px] text-[12px] inline-flex items-center gap-1">
               <Play className="h-3.5 w-3.5" aria-hidden /> {verifyFailure ? '手动重试一次' : '恢复任务'}
             </button>}
-            <button type="button" disabled={pending} onClick={() => retry('new')} className="btn-ghost h-8 px-3 rounded-[6px] text-[12px] inline-flex items-center gap-1">
+            <button type="button" disabled={pending || current.operation==='user_apply'} onClick={() => retry('new')} className="btn-ghost h-8 px-3 rounded-[6px] text-[12px] inline-flex items-center gap-1">
               <RotateCcw className="h-3.5 w-3.5" aria-hidden /> 新建任务重试
             </button>
           </div>
           <p className="text-[11px] text-[var(--text-2)]">
-            {verifyFailure || verifyLimitReached ? '验收失败不会自动修复；同一任务最多验收两次，暂停或恢复不会清零。新建任务是明确开启新一轮，会再次调用模型。' : '恢复任务:沿用同一任务编号、已写入的代码和步骤继续;恢复会重置本次步数与修复额度,最多恢复 3 次。新建任务:保留这条失败记录,从头开始新的一轮。'}
+            {current.operation==='user_apply' ? '手工修改不会调用模型修复。已确认源码保留；重新加载编辑后 Apply，或恢复原任务继续固定验证。' : verifyFailure || verifyLimitReached ? '验收失败不会自动修复；同一任务最多验收两次，暂停或恢复不会清零。新建任务是明确开启新一轮，会再次调用模型。' : '恢复任务:沿用同一任务编号、已写入的代码和步骤继续;恢复会重置本次步数与修复额度,最多恢复 3 次。新建任务:保留这条失败记录,从头开始新的一轮。'}
           </p>
           {err.raw && (
             <details>

@@ -3,6 +3,7 @@ import { mkdir, writeFile, readdir, stat, unlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { logger } from './logger.js';
+import { MAX_PROVIDER_ATTEMPTS } from './provider-retry.js';
 
 export const DEBUG_CAPTURE_DIR = fileURLToPath(new URL('../.forge-debug/llm/', import.meta.url));
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -29,6 +30,19 @@ export function requestDiagnostics({ requestId, logicalCallId, attempt, provider
     input_chars: Object.values(contextChars).reduce((sum, n) => sum + n, 0), context_chars: contextChars,
     request_body_hash: createHash('sha256').update(requestBody).digest('hex'),
     requested_temperature: capability.requestedTemperature, effective_temperature: capability.sentTemperature,
+    temperature_omitted: capability.temperatureOmitted === true,
+    temperature_omit_source: capability.temperatureOmitSource ?? null,
+    requested_max_output_tokens: capability.requestedMaxOutputTokens ?? null,
+    effective_max_output_tokens: body.max_tokens ?? null,
+    output_cap_field: capability.outputCapField ?? null,
+    output_cap_source: capability.outputCapSource ?? null,
+    output_cap_required: capability.requireOutputCap === true,
+    max_physical_attempts: MAX_PROVIDER_ATTEMPTS,
+    trusted_reasoning_effort: capability.trustedReasoningEffort ?? null,
+    effective_reasoning_effort: capability.effectiveReasoningEffort ?? null,
+    reasoning_policy_source: capability.reasoningPolicySource ?? null,
+    reasoning_policy_purpose: capability.reasoningPolicyPurpose ?? purpose,
+    reasoning_policy_required: capability.requireReasoningPolicy === true,
     requested_json_mode: capability.requestedJsonMode, effective_json_mode: capability.effectiveJsonMode,
     requested_reasoning: capability.requestedReasoning, effective_reasoning: capability.effectiveReasoning,
     requested_provider_options: summarizeProviderOptions(requestedOptions), effective_provider_options: summarizeProviderOptions(body),
