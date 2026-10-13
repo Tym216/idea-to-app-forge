@@ -3,8 +3,14 @@ import { Workspace } from './workspace.js';
 import { logger } from './logger.js';
 import { redact } from './telemetry.js';
 
+export async function savedPreviewHealthy(url) {
+ if(!url||!url.startsWith('https://'))return false;
+ try {return (await fetch(url,{method:'GET',credentials:'omit',cache:'no-store',signal:AbortSignal.timeout(6000)})).ok;}
+ catch {return null;}
+}
+
 /** 只唤醒保存的沙箱，绝不走 ensure/create，也不调用模型。 */
-export async function recoverExistingPreview(provider, id, phase, sleep = (ms) => new Promise((r) => setTimeout(r, ms))) {
+export async function recoverExistingPreview(provider, id, phase, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), { existingUrl = null, probeUrl = savedPreviewHealthy } = {}) {
   await phase('checking');
   const sandbox = await provider.client.get(id);
   const state = String(sandbox.state || '').toLowerCase();
@@ -29,12 +35,18 @@ export async function recoverExistingPreview(provider, id, phase, sleep = (ms) =
     if (!up) throw new Error('开发服务未就绪；代码保留，请重试或查看沙箱日志');
   }
   await phase('checking');
+  // Signing again changes the browser origin. A healthy saved URL owns the existing app data.
+  if (existingUrl && (await probeUrl(existingUrl)) !== false) {
+    logger.info('preview.url_reused', { sandboxId: id });
+    return existingUrl;
+  }
   const url = await provider.previewUrl(id, 5173);
+  logger.info('preview.url_resolved', { sandboxId: id });
   if (!url || !url.startsWith('https://')) throw new Error('没有取得有效的预览地址');
   return url;
 }
 
-export async function processOnePreviewRecovery({ rpc, getSandbox, workerId, workspaceFactory = (args) => new Workspace(args) }) {
+export async function processOnePreviewRecovery({ rpc, getSandbox, workerId, getProject = async () => null, workspaceFactory = (args) => new Workspace(args) }) {
   const { data, error } = await rpc('ita_claim_preview_recovery', { p_worker_id: workerId });
   if (error) throw new Error(`preview claim: ${error.message}`);
   const job = Array.isArray(data) ? data[0] : data;
@@ -50,12 +62,15 @@ export async function processOnePreviewRecovery({ rpc, getSandbox, workerId, wor
     if (result.data !== true) { const e = new Error('预览恢复许可已失效'); e.code = 'LEASE_LOST'; throw e; }
   };
   try {
+    const project = await getProject(job.project_id, job.user_id);
+    if (project && (project.id!==job.project_id || project.user_id!==job.user_id || project.sandbox_id!==job.sandbox_id))
+      throw new Error('预览项目或沙箱绑定已变化');
     const provider = getSandbox();
     provider.bindOwner?.(job.sandbox_id, { projectId: job.project_id, userId: job.user_id });
     const workspace = workspaceFactory({ rpc, projectId: job.project_id, workerId, executionId: job.execution_id, sandbox: provider, sandboxId: job.sandbox_id });
     await workspace.initialize({ reconcilePending: false, wake: () => provider.ensure(job.sandbox_id, { projectId: job.project_id, userId: job.user_id, allowRecreate: false }) });
     if (workspace.manifest) validateRuntimeScript(workspace.manifest, 'dev');
-    const url = await workspace.runtime('preview', () => recoverExistingPreview(provider, job.sandbox_id, update));
+    const url = await workspace.runtime('preview', () => recoverExistingPreview(provider, job.sandbox_id, update, undefined, { existingUrl: project?.preview_url }));
     readyBasis = { revision: workspace.state?.revision, hash: workspace.manifest?.code_hash };
     await update('ready', url);
     logger.info('preview.recovered', { projectId: job.project_id, sandboxId: job.sandbox_id });

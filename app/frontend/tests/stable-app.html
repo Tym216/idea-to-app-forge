@@ -1,0 +1,5 @@
+<!doctype html><html><body><label>Task<input id="task"></label><button id="add">Add</button><ul id="items"></ul>
+<script>
+const render=()=>{document.querySelector('#items').textContent=JSON.parse(localStorage.getItem('stable-preview-todos')||'[]').join(', ')};
+document.querySelector('#add').onclick=()=>{const items=JSON.parse(localStorage.getItem('stable-preview-todos')||'[]');items.push(document.querySelector('#task').value);localStorage.setItem('stable-preview-todos',JSON.stringify(items));render()};render();
+</script></body></html>

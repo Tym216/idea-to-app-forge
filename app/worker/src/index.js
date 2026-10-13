@@ -6,7 +6,7 @@ import { initTelemetry, traceTask, shutdownTelemetry } from './telemetry.js';
 import { withExecutionControl, monitorExecution, isSupabaseError } from './execution-control.js';
 import { createTaskMetrics, metricsSnapshot } from './task-metrics.js';
 // Supabase 客户端延迟创建；配置校验与共享环境 guard 必须先通过
-let checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease, executeTask, admin, getSandboxProvider, processOneDeletion, processOnePreviewRecovery;
+let getProject, checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease, executeTask, admin, getSandboxProvider, processOneDeletion, processOnePreviewRecovery;
 
 let stopping = false;
 
@@ -193,7 +193,7 @@ async function main() {
     return;
   }
   if (modelCheck.status === 'unknown') logger.warn('worker.llm_model_unconfirmed', { provider: llmReport.selected.name, model: llmReport.selected.model, reason: modelCheck.reason || '模型列表接口不可用' });
-  ({ checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease } = await import('./supabase.js'));
+  ({ getProject, checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease } = await import('./supabase.js'));
   ({ executeTask } = await import('./agent.js'));
   ({ admin } = await import('./supabase.js'));
   ({ getSandboxProvider } = await import('./sandbox/index.js'));
@@ -220,7 +220,7 @@ async function main() {
       const deletion = await processOneDeletion({ rpc: (fn, a) => admin.rpc(fn, a), getSandbox, workerId: config.workerId })
         .catch((error) => { logger.warn('deletion.loop_error', { error: String(error) }); return null; });
       if (deletion) continue;
-      const recovery = await processOnePreviewRecovery({ rpc: (fn, a) => admin.rpc(fn, a), getSandbox, workerId: config.workerId })
+      const recovery = await processOnePreviewRecovery({ rpc: (fn, a) => admin.rpc(fn, a), getSandbox, getProject, workerId: config.workerId })
         .catch((error) => { logger.warn('preview.recovery_loop_error', { error: String(error) }); return null; });
       if (recovery) continue;
       if (Date.now() - lastPurge > 3600000) {

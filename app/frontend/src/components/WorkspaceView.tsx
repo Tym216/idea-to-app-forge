@@ -36,6 +36,7 @@ type Props = {
   onChanged: () => void | Promise<void>;
   memory: ReactNode;
   actions?: WorkspaceActions;
+  previewUrl?: string | null;
   recovery?: PreviewRecovery | null;
   recoveryError?: string;
   recoveryPending?: boolean;
@@ -228,7 +229,7 @@ export function WorkspaceView(props: Props) {
           </div>
           <div className="flex-1 min-h-0 bg-[var(--panel)]">
             {tab === 'plan' && <PlanPanel plans={plans} feedback={feedback} busy={busy} onChanged={onChanged} actions={actions} />}
-            {tab === 'preview' && <PreviewPane label={workingDraft ? 'Working Workspace · 正在处理或有未发布修改' : 'Working Workspace · 检查时对应 App v'+versions.find(v=>v.id===project?.checkpoint_id)?.version_number} url={readyPreview(project,props.recovery) ? props.recovery?.preview_url ?? null : null} state={state}
+            {tab === 'preview' && <PreviewPane label={workingDraft ? 'Working Workspace · 正在处理或有未发布修改' : 'Working Workspace · 检查时对应 App v'+versions.find(v=>v.id===project?.checkpoint_id)?.version_number} url={props.previewUrl!==undefined ? props.previewUrl : readyPreview(project,props.recovery) ? props.recovery?.preview_url ?? null : null} state={state}
               recovery={props.recovery?.sandbox_id === project?.sandbox_id && props.recovery?.project_id === project?.id ? props.recovery : null}
               recoveryError={props.recoveryError} recoveryPending={props.recoveryPending} onRecover={props.onRecoverPreview} />}
             <div className={tab==='code' ? 'h-full' : 'hidden'}><CodeExplorer files={files} readonly={!props.onApply}

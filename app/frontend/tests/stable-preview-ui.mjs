@@ -1,0 +1,38 @@
+import {createServer} from 'vite';
+import {chromium} from 'playwright';
+import assert from 'node:assert/strict';
+import {fileURLToPath} from 'node:url';
+const root=fileURLToPath(new URL('..',import.meta.url));
+const server=await createServer({configFile:false,envDir:false,root,server:{host:'127.0.0.1',port:0},resolve:{alias:{'@':root+'/src'}},esbuild:{jsx:'automatic'},plugins:[{name:'preview-failure-fixture',configureServer(s){s.middlewares.use((req,res,next)=>{if(req.url==='/tests/unavailable-preview'){res.statusCode=503;res.end('stopped runtime');return;}next();});}}]});
+server.middlewares.use((req,res,next)=>{if(req.url==='/tests/unavailable-preview'){res.statusCode=503;res.end('stopped runtime');return;}next();});
+let browser;
+try {
+ await server.listen();const port=server.httpServer.address().port;
+ browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.FORGE_TEST_CHROMIUM?{executablePath:process.env.FORGE_TEST_CHROMIUM}:{})});
+ const page=await browser.newPage();let external=0;
+ await page.route('**/*',route=>{if(!route.request().url().startsWith('http://127.0.0.1:')){external++;return route.abort();}return route.continue();});
+ const url='http://127.0.0.1:'+port+'/tests/stable-preview-ui.html';
+ await page.goto(url);
+ const frame=page.frameLocator('iframe[title="应用预览"]');
+ await frame.getByLabel('Task').fill('retained');await frame.getByRole('button',{name:'Add',exact:true}).click();
+ const original=await page.locator('iframe').getAttribute('src');
+ const requests=()=>page.evaluate(()=>Number(localStorage.getItem('test-recovery-posts')||0));
+ await page.getByTestId('health').filter({hasText:'true'}).waitFor();
+ await frame.getByLabel('Task').fill('unsaved input');
+ for(let i=0;i<3;i++)await page.getByRole('button',{name:'Poll',exact:true}).click();
+ assert.equal(await frame.getByLabel('Task').inputValue(),'unsaved input');
+ assert.equal(await requests(),0);
+ await page.reload();await frame.getByText('retained',{exact:true}).waitFor();
+ assert.equal(await page.locator('iframe').getAttribute('src'),original);assert.equal(await requests(),0);
+ await page.getByRole('button',{name:'Away/back'}).click();assert.equal(await page.locator('iframe').count(),0);
+ await page.getByRole('button',{name:'Away/back'}).click();await frame.getByText('retained',{exact:true}).waitFor();
+ assert.equal(await page.locator('iframe').getAttribute('src'),original);assert.equal(await requests(),0);
+ await page.getByRole('button',{name:'unknown',exact:true}).click();await frame.getByText('retained',{exact:true}).waitFor();assert.equal(await requests(),0);
+ await page.getByRole('button',{name:'uncertain',exact:true}).click();await frame.getByText('retained',{exact:true}).waitFor();assert.equal(await requests(),0);assert.equal(await page.getByText('正在启动预览…').count(),0);
+ await page.getByRole('button',{name:'pending',exact:true}).click();await page.getByText('正在启动预览…').waitFor();assert.equal(await requests(),0);
+ for(let i=0;i<3;i++)await page.getByRole('button',{name:'Poll',exact:true}).click();assert.equal(await requests(),0);
+ await page.getByRole('button',{name:'broken',exact:true}).click();await page.getByText('正在启动预览…').waitFor();assert.equal(await requests(),1);
+ for(let i=0;i<3;i++)await page.getByRole('button',{name:'Poll',exact:true}).click();assert.equal(await requests(),1);
+ assert.equal(external,0);
+ console.log('PASS local preview entry: same origin/data across refresh/remount; no warm recovery; one HTTP-failure recovery; pending dedup; inconclusive health preserves URL; uncertain preview remains read-only; zero remote operations');
+} finally {await browser?.close();await server.close();}

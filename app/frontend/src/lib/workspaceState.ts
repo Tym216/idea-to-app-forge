@@ -20,3 +20,14 @@ export function requestPreviewOnce(key:string|null,attempted:Set<string>,request
  attempted.add(key);
  return request();
 }
+
+/** Serving a saved URL is read-only. An uncertain preview writer still fences all mutations. */
+export function savedPreviewIdentity(project:Project|null,tasks:Task[],hasSource:boolean):string|null {
+ if(!project?.sandbox_id||project.deletion_state||!hasSource
+   ||tasks.some(t=>t.mode==='build'&&['queued','running'].includes(t.status)))return null;
+ const writer=project.workspace_writer as {kind?:string;sandbox_id?:string;base_hash?:string;base_revision?:number}|null|undefined;
+ if(writer&&(writer.kind!=='preview'||writer.sandbox_id!==project.sandbox_id||writer.base_hash!==project.workspace_hash
+   ||Number(writer.base_revision)!==Number(project.workspace_revision)))return null;
+ if(project.workspace_state!=='confirmed'&&writer?.kind!=='preview')return null;
+ return [project.id,project.sandbox_id,project.workspace_revision,project.workspace_hash,project.preview_url].join(':');
+}

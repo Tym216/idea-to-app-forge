@@ -80,3 +80,44 @@ test('Daytona failure is persisted as failed with secrets redacted', async () =>
 test('empty queue never touches Daytona', async () => {
   assert.equal(await processOnePreviewRecovery({ workspaceFactory: () => ({ initialize: async () => {}, runtime: async (_kind, fn) => fn() }), workerId: 'w', getSandbox: () => { throw new Error('unexpected'); }, rpc: async () => ({ data: [], error: null }) }), null);
 });
+
+test('healthy saved proxy origin is reused without signing/resolving or restarting the runtime', async()=>{
+ const p=provider('started',true);
+ p.previewUrl=async()=>{throw Error('must not sign again');};
+ const saved='https://stable-preview.test/';
+ assert.equal(await recoverExistingPreview(p,'saved',async()=>{},async()=>{},{
+  existingUrl:saved,probeUrl:async url=>{assert.equal(url,saved);return true;},
+ }),saved);
+ assert.deepEqual(p.calls.map(c=>c[0]),['get']);
+});
+test('cold recovery still preserves the saved proxy origin when that URL becomes healthy',async()=>{
+ const p=provider('stopped');
+ p.previewUrl=async()=>{throw Error('must not replace working origin');};
+ const saved='https://stable-preview.test/';
+ assert.equal(await recoverExistingPreview(p,'saved',async()=>{},async()=>{},{
+  existingUrl:saved,probeUrl:async()=>true,
+ }),saved);
+ assert.deepEqual(p.calls.map(c=>c[0]),['get','start','dev']);
+});
+test('a genuinely expired/unhealthy saved proxy URL alone permits resolving a replacement',async()=>{
+ const p=provider('started',true);let resolved=0;
+ p.previewUrl=async()=>{resolved++;return 'https://replacement.test/';};
+ assert.equal(await recoverExistingPreview(p,'saved',async()=>{},async()=>{},{
+  existingUrl:'https://expired.test/',probeUrl:async()=>false,
+ }),'https://replacement.test/');
+ assert.equal(resolved,1);
+ assert.deepEqual(p.calls.map(c=>c[0]),['get']);
+});
+test('project owner/sandbox drift stops recovery before any provider side effect',async()=>{
+ const p=provider('started',true);
+ const r=await processOnePreviewRecovery({workerId:'w',getProject:async()=>({id:'p',user_id:'wrong',sandbox_id:'saved'}),
+  getSandbox:()=>p,rpc:async fn=>({data:fn.includes('claim')?[{project_id:'p',user_id:'u',sandbox_id:'saved',execution_id:'e'}]:true})});
+ assert.equal(r.status,'failed');assert.equal(p.calls.length,0);
+});
+
+test('inconclusive network/CORS observation does not replace a saved working origin',async()=>{
+ const p=provider('started',true);p.previewUrl=async()=>{throw Error('blind re-sign forbidden');};
+ assert.equal(await recoverExistingPreview(p,'saved',async()=>{},async()=>{},{
+  existingUrl:'https://stable-preview.test/',probeUrl:async()=>null,
+ }),'https://stable-preview.test/');
+});

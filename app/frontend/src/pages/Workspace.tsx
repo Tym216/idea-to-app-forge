@@ -1,4 +1,5 @@
-import { previewRecoveryKey, requestPreviewOnce } from '@/lib/workspaceState';
+import {usePreviewEntry} from '@/lib/previewEntry';
+import { previewRecoveryKey, savedPreviewIdentity } from '@/lib/workspaceState';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { AppVersion, Message, Plan, PlanFeedback, PreviewRecovery, Project, ProjectFile, Task } from '@/lib/supabase';
@@ -36,14 +37,12 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   const [feedback, setFeedback] = useState<PlanFeedback[]>([]);
   const [error, setError] = useState('');
   const autoSubmitted = useRef(false);
-  const autoRecovered = useRef(new Set<string>());
   const recoveryRequest=useRef<Promise<void>|null>(null);
   const readFailures=useRef(0);
   const [recovery, setRecovery] = useState<PreviewRecovery | null>(null);
   const [recoveryError, setRecoveryError] = useState('');
   const [recoveryPending, setRecoveryPending] = useState(false);
 
-  const [entryChecked,setEntryChecked] = useState('');
   const recoverPreview = useCallback(() => {
     if(recoveryRequest.current) return recoveryRequest.current;
     const operation=(async()=>{
@@ -53,7 +52,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
       try {
         // A timed-out submission may already be queued; do not blindly submit another job.
         const job=await requestPreviewRecovery(projectId);
-        setRecovery(job);setEntryChecked(projectId);
+        setRecovery(job);
       } catch(e) {setRecoveryError(e instanceof Error ? e.message : String(e));}
       finally {setRecoveryPending(false);}
     })();
@@ -65,9 +64,9 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   const refresh = useCallback(async () => {
     try {
       const before = await getProject(projectId);
-      const [m, f, t, pl, fb, vs] = await Promise.all([
+      const [m, f, t, pl, fb, vs, job] = await Promise.all([
         listMessages(projectId), listFiles(projectId), listTasks(projectId),
-        listPlans(projectId), listPlanFeedback(projectId), listAppVersions(projectId),
+        listPlans(projectId), listPlanFeedback(projectId), listAppVersions(projectId), getPreviewRecovery(projectId),
       ]);
       const p = await getProject(projectId);
       // Monotonic revision brackets the files SELECT; never pair old files with a new edit basis.
@@ -76,6 +75,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
         return;
       }
       setProject(p);
+      setRecovery(job);
       setMessages(m);
       setFiles(f);
       setTasks(t);
@@ -94,10 +94,12 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
     return () => clearInterval(timer);
   }, [refresh]);
 
-  useEffect(() => {
-    const key=previewRecoveryKey(project,tasks,files.length>0);
-    void requestPreviewOnce(key,autoRecovered.current,recoverPreview);
-  },[project,tasks,files,recoverPreview]);
+  const previewIdentity=savedPreviewIdentity(project,tasks,files.length>0);
+  const currentRecovery=recovery?.sandbox_id===project?.sandbox_id&&recovery?.project_id===project?.id?recovery:null;
+  const previewHealthy=usePreviewEntry({identity:previewIdentity,url:project?.preview_url??null,
+    pending:recoveryPending||['queued','running'].includes(currentRecovery?.status??''),
+    canRecover:previewRecoveryKey(project,tasks,files.length>0)!==null,recover:recoverPreview});
+  const savedUrl=previewIdentity&&previewHealthy!==false?project?.preview_url??null:null;
 
   useEffect(() => {
     if (!recovery || !['queued', 'running'].includes(recovery.status)) return;
@@ -151,9 +153,10 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
       onExport={() => project && exportProjectZip(project, files)}
       onSubmit={submit}
       onChanged={refresh}
-      recovery={recovery}
+      previewUrl={savedUrl}
+      recovery={savedUrl&&previewHealthy===true&&currentRecovery?.status==='failed'?null:currentRecovery}
       recoveryError={recoveryError}
-      recoveryPending={recoveryPending || Boolean(project?.sandbox_id && entryChecked!==projectId)}
+      recoveryPending={recoveryPending}
       onRecoverPreview={() => void recoverPreview()}
       memory={<MemoryPanel projectId={projectId} />}
     />

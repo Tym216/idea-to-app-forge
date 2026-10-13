@@ -22,7 +22,7 @@ export function PreviewPane({ label, url, state = 'empty', recovery, recoveryErr
   const recovering = recoveryPending || recovery?.status === 'queued' || recovery?.status === 'running';
   const transient=/network|fetch|timeout|503|502/i.test(recoveryError || '');
   const waiting=!!(recovering || transient);
-  const problem=recovery?.status==='failed' ? recovery.error || '预览恢复失败' : !waiting ? recoveryError || '' : '';
+  const problem=!url&&recovery?.status==='failed' ? recovery.error || '预览恢复失败' : !waiting ? recoveryError || '' : '';
   if (waiting || problem) return (
     <div className="h-full grid place-items-center p-6" role="status">
       <div className="text-center max-w-[420px]">
@@ -60,7 +60,7 @@ export function PreviewPane({ label, url, state = 'empty', recovery, recoveryErr
           <ExternalLink className="h-3.5 w-3.5" />
         </a>
       </div>
-      <iframe key={`${nonce}:${recovery?.execution_id ?? ''}:${recovery?.updated_at ?? ''}`} src={url} title="应用预览" className="flex-1 w-full bg-white" />
+      <iframe key={`${nonce}:${url}`} src={url} title="应用预览" className="flex-1 w-full bg-white" />
     </div>
   );
 }
