@@ -6,7 +6,7 @@ import { initTelemetry, traceTask, shutdownTelemetry } from './telemetry.js';
 import { withExecutionControl, monitorExecution, isSupabaseError } from './execution-control.js';
 import { createTaskMetrics, metricsSnapshot } from './task-metrics.js';
 // Supabase 客户端延迟创建；配置校验与共享环境 guard 必须先通过
-let getProject, checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease, executeTask, admin, getSandboxProvider, processOneDeletion, processOnePreviewRecovery;
+let inspectRuntimeWriter, getProject, checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease, executeTask, admin, getSandboxProvider, processOneDeletion, processOnePreviewRecovery;
 
 let stopping = false;
 
@@ -44,6 +44,7 @@ export function summarizeError(error, task) {
     PLAN_NOT_APPROVED: ['计划尚未批准', '在计划面板审阅并批准'],
     DESIGN_INVALID: ['设计方案生成失败', '「新建任务」重试'],
     PLAN_INVALID: ['计划生成失败', '「新建任务」重试'],
+    LLM_PROVIDER_BUSY: [task.mode==='plan'?'模型服务暂时繁忙，本轮未产生代码修改。你可以继续重试。':'模型服务暂时繁忙，已保存代码与进度。可以继续重试。', '稍后点击继续重试；已有项目与代码保留'],
     LLM_TIMEOUT: [String(error.message), '模型请求超时。检查模型服务状态后可「恢复任务」，已保存的代码会保留'],
     LLM_NETWORK: [String(error.message), '模型网络请求失败。检查 Worker 网络后可「恢复任务」，无需新建沙箱'],
     LLM_FORMAT_STALLED: ['模型工具调用经一次格式修正仍无效，已停止', '查看 Langfuse 的模型输出，检查输出长度或模型兼容性后再恢复'],
@@ -116,7 +117,8 @@ async function handleTask(task) {
     const tokens = usage ? `；输入 ${usage.input ?? '未返回'} / 输出 ${usage.output ?? '未返回'} tokens` : '';
     if (event === 'retrying') {
       await appendStep(task, { tool: 'llm', event, phase: 'llm_retry',
-        observation: `第 ${modelCall} 次模型调用遇到 ${reason}；等待 ${delayMs}ms 后进行第 ${attempt} 次供应商请求（最多两次）` });
+        observation: reason === 'rate_limit' ? '模型服务繁忙，正在重试…' : '模型请求暂时异常，正在有限重试…',
+        result: { attempt, delayMs, reason } });
       return;
     }
     await appendStep(task, { tool: 'llm', event, phase: event === 'started' ? 'llm_request' : 'llm_response', ms,
@@ -193,7 +195,7 @@ async function main() {
     return;
   }
   if (modelCheck.status === 'unknown') logger.warn('worker.llm_model_unconfirmed', { provider: llmReport.selected.name, model: llmReport.selected.model, reason: modelCheck.reason || '模型列表接口不可用' });
-  ({ getProject, checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease } = await import('./supabase.js'));
+  ({ inspectRuntimeWriter, getProject, checkWorkspaceSchema, completedCheckpoint, claimTask, heartbeat, updateTask, appendStep, setExecution, ensureLease } = await import('./supabase.js'));
   ({ executeTask } = await import('./agent.js'));
   ({ admin } = await import('./supabase.js'));
   ({ getSandboxProvider } = await import('./sandbox/index.js'));
@@ -220,7 +222,7 @@ async function main() {
       const deletion = await processOneDeletion({ rpc: (fn, a) => admin.rpc(fn, a), getSandbox, workerId: config.workerId })
         .catch((error) => { logger.warn('deletion.loop_error', { error: String(error) }); return null; });
       if (deletion) continue;
-      const recovery = await processOnePreviewRecovery({ rpc: (fn, a) => admin.rpc(fn, a), getSandbox, getProject, workerId: config.workerId })
+      const recovery = await processOnePreviewRecovery({ rpc: (fn, a) => admin.rpc(fn, a), getSandbox, getProject, inspectWriter: inspectRuntimeWriter, workerId: config.workerId })
         .catch((error) => { logger.warn('preview.recovery_loop_error', { error: String(error) }); return null; });
       if (recovery) continue;
       if (Date.now() - lastPurge > 3600000) {

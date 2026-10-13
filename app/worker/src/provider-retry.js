@@ -24,8 +24,7 @@ export function classifyProviderError(error) {
   if ([400, 401, 403, 404, 422].includes(status)) return fail('configuration_or_auth');
   if (error?.code === 'LLM_TIMEOUT') return fail('timeout');
   if (status === 429) {
-    return error.retryAfterMs != null || /rate.?limit|too many requests|限流|请求频率/i.test(message)
-      ? retry('rate_limit') : fail('unknown_429');
+    return retry('rate_limit'); // Quota/auth were excluded above; HTTP 429 is provider busy.
   }
   // HTTP 408 is a short request-level timeout; it shares the same one-retry deadline.
   if (status === 408) return retry('request_timeout');
@@ -61,7 +60,7 @@ export async function withProviderRetry(send, {
       signal?.throwIfAborted();
       const decision = classifyProviderError(error);
       if (attempt === MAX_PROVIDER_ATTEMPTS || decision.action !== 'retry_once' || activeSignal.aborted) throw error;
-      const ms = Math.max(error.retryAfterMs ?? 0, 300 + Math.floor(Math.max(0, Math.min(1, random())) * 300));
+      const ms = Math.max(error.retryAfterMs ?? 0, (decision.reason === 'rate_limit' ? 1500 : 300) + Math.floor(Math.max(0, Math.min(1, random())) * 300));
       // Honour Retry-After, but do not wait indefinitely or start with an exhausted budget.
       if (ms > 5000 || deadline - now() <= ms + 1000) throw error;
       await onRetry({ attempt: attempt + 1, delayMs: ms, reason: decision.reason });

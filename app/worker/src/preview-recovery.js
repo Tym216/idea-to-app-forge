@@ -46,7 +46,7 @@ export async function recoverExistingPreview(provider, id, phase, sleep = (ms) =
   return url;
 }
 
-export async function processOnePreviewRecovery({ rpc, getSandbox, workerId, getProject = async () => null, workspaceFactory = (args) => new Workspace(args) }) {
+export async function processOnePreviewRecovery({ rpc, getSandbox, workerId, getProject = async () => null, inspectWriter = async () => ({terminal:false}), workspaceFactory = (args) => new Workspace(args) }) {
   const { data, error } = await rpc('ita_claim_preview_recovery', { p_worker_id: workerId });
   if (error) throw new Error(`preview claim: ${error.message}`);
   const job = Array.isArray(data) ? data[0] : data;
@@ -68,6 +68,25 @@ export async function processOnePreviewRecovery({ rpc, getSandbox, workerId, get
     const provider = getSandbox();
     provider.bindOwner?.(job.sandbox_id, { projectId: job.project_id, userId: job.user_id });
     const workspace = workspaceFactory({ rpc, projectId: job.project_id, workerId, executionId: job.execution_id, sandbox: provider, sandboxId: job.sandbox_id });
+    if (workspace.read) await workspace.read();
+    if (workspace.state?.writer) {
+      const old=workspace.state.writer;
+      await workspace.reconcileRuntime({inspect:writer=>inspectWriter(job.project_id,job.user_id,writer),
+        quiesce:async()=>{
+          // Stop -> Stopped clears old command memory. Never infer quiescence from a lease alone.
+          await update('checking');
+          const current=await provider.client.get(job.sandbox_id);
+          const state=String(current.state).toLowerCase();
+          if(state==='started')await provider.client.stop(current);
+          else if(!['stopped','archived'].includes(state))throw new Error('沙箱仍在状态转换，不能释放写入资格');
+          const stopped=await provider.client.get(job.sandbox_id);
+          if(!['stopped','archived'].includes(String(stopped.state).toLowerCase()))throw new Error('未确认旧进程停止');
+          await provider.client.start(stopped,180);
+          provider.cache.delete(job.sandbox_id);
+          return {stopped:true};
+        }});
+      logger.info('workspace.reconciled',{projectId:job.project_id,kind:old.kind,proof:'stopped_lifecycle_and_exact_manifest'});
+    }
     await workspace.initialize({ reconcilePending: false, wake: () => provider.ensure(job.sandbox_id, { projectId: job.project_id, userId: job.user_id, allowRecreate: false }) });
     if (workspace.manifest) validateRuntimeScript(workspace.manifest, 'dev');
     const url = await workspace.runtime('preview', () => recoverExistingPreview(provider, job.sandbox_id, update, undefined, { existingUrl: project?.preview_url }));

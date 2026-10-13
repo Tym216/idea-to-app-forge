@@ -40,7 +40,7 @@ const passed={base:{blocking:[],warnings:[]},checks:[{id:'A1',status:'pass'}],sc
  * executeTask, runBuild, tool pipeline, common chat, memory and completion call stay real.
  * No source on disk is rewritten, and no SDK/DB/provider operation can escape the mocks.
  */
-async function fixture({pathological=false, verification=passed, budget='0.10',validationResume=false}={}) {
+async function fixture({pathological=false, verification=passed, budget='0.10',validationResume=false,planBusy=false}={}) {
  const prior={...config},oldFetch=globalThis.fetch,oldLogger={...logger};
  Object.assign(config,profile,{llmMaxTheoreticalCostUsdPerExecution:budget});
  const logs=[],files=new Map(),operations=[],events=[];
@@ -58,7 +58,8 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   for(const [path,content] of Object.entries(SCAFFOLD_FILES)) files.set(path,content);
   files.set('src/App.tsx','export default function App(){return <main>records</main>}');
  }
- let workspace,posts=0,decisions=0,memories=0,checkpoints=0;
+ if(planBusy)task.mode='plan';
+ let workspace,posts=0,decisions=0,memories=0,checkpoints=0,planWrites=0;
  const sb={
   workdir:'/offline',
   async ensure(){operations.push('ensure');return {sandboxId:'offline-sandbox',alive:false};},
@@ -123,7 +124,7 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   listFeedback:async()=>[],ensureLease:async()=>{},
   updateTask:async()=>{},updateProject:async()=>{},
   appendStep:async(t,step)=>t.steps.push(step),
-  addMessage:async()=>{},savePlan:async()=>{throw new Error('unexpected Plan generation');},
+  addMessage:async()=>{},savePlan:async()=>{planWrites++;throw new Error('unexpected Plan generation');},
   listFiles:async()=>[],getLatestPlan:async()=>null,
   getRequestedChangeSet:async()=>{throw new Error('unexpected User Apply');},
  };
@@ -154,6 +155,7 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   assert.equal(Object.hasOwn(b,'temperature'),false);assert.equal(b.provider.require_parameters,true);
   const last=logs.findLast(l=>l.event==='llm.cost_admission');
   assert.ok(last.admitted);assert.ok(last.execution_reserved_after<=Number(budget));posts++;
+  if(planBusy)return new Response(JSON.stringify({error:{message:'provider busy',code:429}}),{status:429});
   let output;
   if(b.max_tokens===1024){memories++;output={upsert:[],remove:[]};}
   else{
@@ -170,7 +172,7 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   const control={taskId:task.id,executionId:task.execution_id,signal:new AbortController().signal,checkLease:async()=>{}};
   let result,error;
   try{result=await withExecutionControl(control,()=>executeTask(task));}catch(e){error=e;}
-  return {result,error,posts,decisions,memories,checkpoints,logs,events,operations,task,workspace};
+  return {result,error,posts,decisions,memories,checkpoints,planWrites,logs,events,operations,task,workspace};
  }finally{Object.assign(config,prior);globalThis.fetch=oldFetch;Object.assign(logger,oldLogger);delete globalThis[binding];}
 }
 
@@ -224,4 +226,11 @@ test('automation-only resume reuses valid build, performs fixed verification and
  assert.equal(f.workspace.state.revision,1);assert.equal(f.workspace.state.verify.status,'success_with_warnings');
  assert.ok(!f.events.includes('memory'));assert.ok(!f.operations.includes('start_dev'));
  assert.ok(!f.operations.some(op=>op.startsWith('npm run')||op.startsWith('npm install')));
+});
+
+test('real Plan 429: one bounded physical retry, per-request admission, no Workspace/writer or duplicate Plan write',async()=>{
+ const f=await fixture({planBusy:true});
+ assert.equal(f.error?.code,'LLM_PROVIDER_BUSY');assert.equal(f.posts,2);
+ assert.equal(f.planWrites,0);assert.equal(f.workspace,undefined);assert.equal(f.checkpoints,0);assert.equal(f.memories,0);
+ assert.equal(f.logs.filter(l=>l.event==='llm.cost_admission'&&l.admitted).length,2);
 });

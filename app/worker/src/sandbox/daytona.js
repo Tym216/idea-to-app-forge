@@ -26,6 +26,7 @@ export class DaytonaProvider {
     this.client = Object.freeze({
       get: (id) => this.getOwned(id),
       start: async (sb, ...args) => { const current = await this.getOwned(sb.id); return this.#rawClient.start(current, ...args); },
+      stop: async (sb) => { const current = await this.getOwned(sb.id); return this.#rawClient.stop(current); },
       delete: async (sb, ...args) => { const current = await this.getOwned(sb.id); return this.#rawClient.delete(current, ...args); },
     });
     this.cache = new Map();

@@ -4,11 +4,11 @@ import { classifyProviderError, retryAfterMs, withProviderRetry } from '../src/p
 
 const transient = () => Object.assign(new Error('unavailable'), { httpStatus: 503 });
 test('central classification distinguishes rate/quota/auth/timeout/transport; numeric codes are safe', () => {
-  for (const error of [transient(), { httpStatus: 408 }, { code: 'LLM_NETWORK', causeCode: 'ECONNRESET' }, { httpStatus: 429, retryAfterMs: 1000 }]) {
+  for (const error of [transient(), { httpStatus: 408 }, { code: 'LLM_NETWORK', causeCode: 'ECONNRESET' }, { httpStatus: 429, retryAfterMs: 1000 }, { httpStatus: 429 }]) {
     assert.equal(classifyProviderError(error).action, 'retry_once');
   }
   for (const error of [{ httpStatus: 429, providerCode: 1113, retryAfterMs: 100 },
-    { httpStatus: 429, message: 'insufficient quota' }, { httpStatus: 429 }, { httpStatus: 402 }, { httpStatus: 401 },
+    { httpStatus: 429, message: 'insufficient quota' }, { httpStatus: 402 }, { httpStatus: 401 },
     { code: 'LLM_TIMEOUT' }, { code: 'LLM_INVALID_RESPONSE' }, { code: 'LEASE_LOST', httpStatus: 503 }, { code: 23 }]) {
     assert.equal(classifyProviderError(error).action, 'fail');
   }
@@ -69,4 +69,12 @@ test('HTTP 408 gets at most one transparent retry under the same deadline', asyn
     throw Object.assign(new Error('request timeout'), { httpStatus: 408 });
   }, { wait: async () => {} }), { httpStatus: 408 });
   assert.equal(calls, 2);
+});
+
+test('429 busy gets one physical retry with backoff under one logical call; quota remains terminal',async()=>{
+ const attempts=[],waits=[];
+ assert.equal(await withProviderRetry(async({attempt})=>{attempts.push(attempt);if(attempt===1)throw {httpStatus:429};return 'plan';},
+ {wait:async ms=>waits.push(ms),random:()=>0}),'plan');
+ assert.deepEqual(attempts,[1,2]);assert.deepEqual(waits,[1500]);
+ assert.equal(classifyProviderError({httpStatus:429,message:'insufficient quota'}).action,'fail');
 });

@@ -71,3 +71,11 @@ test('real flock: reconciliation cannot retire while old operation holds stable 
  process.kill(-child.pid, 'SIGTERM');
  await new Promise(resolve=>child.once('close',resolve));
 });
+
+test('a durable newer unactivated writer can retire an older fence; no late old token may promote',async(t)=>{
+ const f=await fixture(t),newer={epoch:2,token:randomUUID()};
+ assert.equal((await f.run('retire',{},newer)).quiesced,true);
+ assert.equal((await f.run('promote',{baseline:[],files:[{path:'a.ts',content:'late'}]})).error,'WORKSPACE_FENCE_LOST');
+ assert.equal((await f.run('retire')).error,'WORKSPACE_FENCE_LOST');
+ assert.equal((await f.run('scan')).manifest.files.length,0);
+});

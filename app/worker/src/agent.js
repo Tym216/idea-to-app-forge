@@ -1,3 +1,4 @@
+import { savedPreviewHealthy } from './preview-recovery.js';
 import { verificationContinuationCandidate, assertVerificationContinuationBasis } from './verification-continuation.js';
 import { renderPersistenceHelper, PERSISTENCE_GUIDANCE } from './app-persistence.js';
 import { assertUserApplyExecution, executeUserApply, userApplyBasis } from './user-apply.js';
@@ -300,7 +301,8 @@ async function runTool(ctx, tool, args) {
       }
       const devLog = commandId ? (await sandbox.readLogs(sandboxId, { commandId }).catch(() => '')).slice(-1500) : '';
       if (!ready) return { observation: `开发服务器 60 秒内未监听 5173 端口,日志:\n${devLog}`, ok: false };
-      const previewUrl = await sandbox.previewUrl(sandboxId, 5173);
+      const previewUrl = ctx.existingPreviewUrl && (await savedPreviewHealthy(ctx.existingPreviewUrl)) !== false
+        ? ctx.existingPreviewUrl : await sandbox.previewUrl(sandboxId, 5173);
       if (!previewUrl) return { observation: '服务已启动但未取得预览地址。', ok: false };
       progress.recordPreview(previewUrl);
       ctx.previewUrl = previewUrl;
@@ -381,7 +383,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
     { role: 'user', content: context },
   ];
   const progress = new BuildProgress({ maxFixRounds: config.maxFixRounds, fixRounds: task.fix_rounds || 0 });
-  const ctx = { task, sandbox, sandboxId, progress, previewUrl: '',
+  const ctx = { task, sandbox, sandboxId, progress, existingPreviewUrl: project.sandbox_id === sandboxId ? project.preview_url : null, previewUrl: '',
     deps: { ...deps, checkLease: deps.checkLease || (() => ensureLease(task.id)) },
     acceptance: canonicalAcceptance, verificationResult: null, fusionEnabled, runtimePolicy, workspace: options.workspace,
     contextRevision: options.workspace?.state.revision, buildBasis: options.buildBasis, verifyBasis: options.verifyBasis };
@@ -736,8 +738,8 @@ export async function executeTask(task) {
       onApply: async (change) => {
         task.tool_steps += change.changes.length;
         recordToolCall('user_apply');
-        for (const file of change.changes) recordOperation('write_file',true);
-        await appendStep(task, {tool:'user_apply',phase:'edit',event:'finished',ok:true,observation:'已确认应用：'+change.changes.map(c=>c.path).join(', ')});
+        for (const file of change.changes) recordOperation(file.operation === 'delete' ? 'delete_file' : 'write_file',true);
+        await appendStep(task, {tool:'user_apply',phase:'edit',event:'finished',ok:true,observation:'已确认应用：'+change.changes.map(c=>c.path).join(', '),result:{files:change.changes.map(({path,operation})=>({path,operation}))}});
       },
       validateBasis: async (change) => {
         if (task.tool_steps + (change.status === 'committed' ? 0 : change.changes.length) + 3 > config.maxToolSteps) throw new AgentStopError('TOOL_STEP_LIMIT','预算不足以应用修改并完成固定验证；尚未改源码');
@@ -752,7 +754,8 @@ export async function executeTask(task) {
         return { plan, acceptance, buildBasis, verifyBasis };
       },
       validateAndComplete: async (basis) => {
-        const result = await runDeterministicValidation(task, sandbox, sandboxId, workspace, basis, deps);
+        const result = await runDeterministicValidation(task, sandbox, sandboxId, workspace, basis, deps,
+          {summary:task.prompt,existingPreviewUrl:project.preview_url});
         await workspace.runtime('checkpoint', async () => ({}));
         if (buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId)) !== basis.buildBasis) throw sourceError('WORKSPACE_EVIDENCE_STALE', 'Build runtime basis changed');
         const checkpoint = await workspace.call('ita_complete_build_checkpoint', {
@@ -827,13 +830,13 @@ export async function buildRuntimeBasis(sandbox, sandboxId) {
 }
 
 /** Deterministic edit validation reuses the actual Worker tool pipeline; no ReAct or model calls. */
-export async function runDeterministicValidation(task, sandbox, sandboxId, workspace, basis, deps, { summary = '已应用用户提交的文件修改。', stageNote = '已确认用户提交；无模型调用' } = {}) {
+export async function runDeterministicValidation(task, sandbox, sandboxId, workspace, basis, deps, { summary = '已应用用户提交的文件修改。', stageNote = '已确认用户提交；无模型调用', existingPreviewUrl = null } = {}) {
   task.plan = initialStages();
   for (const stage of task.plan.filter(s=>['understand','read','edit'].includes(s.key))) {stage.status='done';stage.note=stageNote;}
   const progress = new BuildProgress({ maxFixRounds: config.maxFixRounds, fixRounds: task.fix_rounds || 0 });
   const ctx = { task, sandbox, sandboxId, workspace, progress, deps, acceptance: basis.acceptance,
     buildBasis: basis.buildBasis, verifyBasis: basis.verifyBasis, contextRevision: workspace.state.revision,
-    previewUrl: '', verificationResult: null, fusionEnabled: false, runtimePolicy: { workflow: 'manual', afterBuildSuccess: [] } };
+    existingPreviewUrl, previewUrl: '', verificationResult: null, fusionEnabled: false, runtimePolicy: { workflow: 'manual', afterBuildSuccess: [] } };
   if (task.tool_steps + 3 > config.maxToolSteps) throw new AgentStopError('TOOL_STEP_LIMIT', 'Validation budget exhausted; source preserved');
   for (const tool of ['build', 'start_dev', 'verify']) {
     const result = await executeOperation(ctx, tool, {}, true);

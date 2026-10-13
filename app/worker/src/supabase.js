@@ -320,3 +320,16 @@ export async function getRequestedChangeSet(task) {
   if (error) throw stateError('User Apply submission', error);
   return data;
 }
+
+export async function inspectRuntimeWriter(projectId,userId,writer) {
+ const {data:tasks,error}=await admin.from('ita_tasks').select('id,status,execution_id,lease_until').eq('project_id',projectId).eq('user_id',userId);
+ if(error)throw stateError('工作区执行状态读取',error);
+ const task=writer.task_id?tasks.find(t=>t.id===writer.task_id):null;
+ const active=tasks.some(t=>['queued','running','paused'].includes(t.status));
+ const leaseActive=tasks.some(t=>t.execution_id===writer.execution_id&&t.lease_until&&Date.parse(t.lease_until)>Date.now());
+ // A preview operation's retained error is written only after its controlled call returned.
+ // A full stopped lifecycle below is still required, since a returned timeout is not quiescence.
+ const terminal=task?['failed','cancelled','succeeded'].includes(task.status):
+   writer.kind==='preview'&&typeof writer.result?.error==='string';
+ return {terminal,active,leaseActive};
+}

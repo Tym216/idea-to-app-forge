@@ -66,7 +66,7 @@ async function main() {
   }
   if (spec.mode === 'retire') {
     const current = await fence();
-    if (current.token && current.token !== spec.token) throw new Error('WORKSPACE_FENCE_LOST');
+    if (current.epoch > spec.epoch || (current.epoch === spec.epoch && current.token && current.token !== spec.token)) throw new Error('WORKSPACE_FENCE_LOST');
     await atomic(fenceFile, JSON.stringify({ ...current, epoch: spec.epoch, token: spec.token, retired: true }));
     return { manifest: await scan(), quiesced: true };
   }

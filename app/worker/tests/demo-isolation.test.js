@@ -75,7 +75,7 @@ function ownerFixture(owner={projectId:'projectB',userId:'userB'}) {
   getPreviewLink:effect,setAutostopInterval:effect,
  };
  const p=new DaytonaProvider({settings,client:{
-  get:async()=>{counters.gets++;return sb;},start:effect,delete:effect,
+  get:async()=>{counters.gets++;return sb;},start:effect,stop:effect,delete:effect,
   list:async function*(){counters.lists++;yield sb;},
  }});
  // A metadata/cache entry is never ownership authority.
@@ -90,7 +90,7 @@ function projectExits(p,sb) {
   ['read',()=>p.readFile(sb.id,'src/a.ts')],['background',()=>p.startBackground(sb.id,'vite')],
   ['preview',()=>p.previewUrl(sb.id)],['idle',()=>p.configureIdle(sb)],
   ['destroy',()=>p.destroy(sb.id)],['guarded start',()=>p.client.start(sb)],
-  ['guarded delete',()=>p.client.delete(sb)],['list files',()=>p.listFiles(sb.id)],
+  ['guarded stop',()=>p.client.stop(sb)],['guarded delete',()=>p.client.delete(sb)],['list files',()=>p.listFiles(sb.id)],
   ['process check',()=>p.checkProcess(sb.id,'vite')],['port check',()=>p.isPortListening(sb.id,5173)],
   ['logs',()=>p.readLogs(sb.id,{commandId:'cmd'})],['empty logs',()=>p.readLogs(sb.id)],
  ];

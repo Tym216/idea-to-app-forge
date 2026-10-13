@@ -123,6 +123,31 @@ export class Workspace {
     }
     await this.read();
   }
+  /** Runtime recovery uses actual executor quiescence, never lease expiry alone. */
+  async reconcileRuntime({ inspect, quiesce }) {
+    await this.read();
+    const writer=this.state.writer, baseline=this.manifest;
+    if(!writer)return;
+    if(writer.changeset_id||!['install','build','start','verify','preview','checkpoint'].includes(writer.kind))
+      throw sourceError('WORKSPACE_UNCERTAIN','源码修改仍需按原记录核对；没有自动覆盖');
+    const status=await inspect(writer);
+    if(!status.terminal||status.leaseActive||status.active)
+      throw sourceError('WORKSPACE_UNCERTAIN','执行仍活动或状态无法确认；未释放写入资格');
+    const proof=await quiesce(writer);
+    if(proof?.stopped!==true)throw sourceError('WORKSPACE_UNCERTAIN','运行进程未确认停止');
+    await this.read();
+    if(this.state.writer?.token!==writer.token||this.manifest.code_hash!==baseline.code_hash)
+      throw sourceError('WORKSPACE_CONFLICT','核对期间工作区依据变化');
+    const finalStatus=await inspect(writer);
+    if(!finalStatus.terminal||finalStatus.leaseActive||finalStatus.active)
+      throw sourceError('WORKSPACE_UNCERTAIN','核对期间执行重新变为活动；未释放写入资格');
+    const retired=await this.gateway.run('retire',writer,{},true);
+    if(retired.manifest.code_hash!==baseline.code_hash)
+      throw sourceError('WORKSPACE_CONFLICT','实际源码与持久化版本不一致；保留差异，未覆盖');
+    await this.call('ita_workspace_reconcile',{p_old_token:writer.token,p_quiesced:true,
+      p_hash:retired.manifest.code_hash,p_files:retired.manifest.files});
+    await this.read();
+  }
   async prepare(changes, origin, target, requestId, observed = null) {
     return this.call('ita_workspace_prepare', { p_request_id: requestId, p_origin: origin, p_base_revision: this.state.revision, p_changes: changes, p_target_hash: target.code_hash, ...(observed ? { p_observed_files: observed.files } : {}) });
   }

@@ -194,6 +194,7 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
         error.httpStatus = response.status;
         error.retryAfterMs = retryAfterMs(response.headers?.get?.('retry-after'));
         try { error.providerCode = JSON.parse(payload)?.error?.code; } catch {}
+        if (classifyProviderError(error).reason === 'rate_limit') error.code = 'LLM_PROVIDER_BUSY';
         throw error;
       }
 
