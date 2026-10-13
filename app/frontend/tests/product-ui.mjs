@@ -26,5 +26,19 @@ let browser;try{
  await page.getByRole('textbox',{name:'新文件路径'}).fill('src/note.ts');await page.getByRole('button',{name:'Add File',exact:true}).click();
  await page.getByRole('textbox',{name:'编辑 src/note.ts'}).fill('export const note = 1;');assert.equal(await page.getByTestId('submissions').textContent(),'0');
  await page.getByRole('button',{name:'删除文件',exact:true}).click();assert.equal(await page.getByRole('textbox',{name:'编辑 src/note.ts'}).count(),0);
+ // An Apply can complete while the browser is closed: identical saved targets
+ // must not remain stale after reload. A genuinely different stale draft survives.
+ const draftKey='forge-editor-draft:abcdefghijklmnopqrst:p';
+ await page.evaluate(k=>localStorage.setItem(k,JSON.stringify({schema:1,base:1,active:'src/App.tsx',drafts:{'src/App.tsx':'Blue string'}})),draftKey);
+ await page.reload();await page.getByRole('tab',{name:/代码/}).click();await editor.waitFor();
+ assert.equal(await editor.inputValue(),'Blue string');
+ assert.equal(await page.evaluate(k=>localStorage.getItem(k),draftKey),null);
+ assert.ok(!(await page.locator('body').innerText()).includes('Workspace changed.'));
+ assert.equal(await page.getByRole('button',{name:'Add File',exact:true}).isEnabled(),true);
+ await page.evaluate(k=>localStorage.setItem(k,JSON.stringify({schema:1,base:1,active:'src/App.tsx',drafts:{'src/App.tsx':'still pending'}})),draftKey);
+ await page.reload();await page.getByRole('tab',{name:/代码/}).click();await editor.waitFor();
+ assert.equal(await editor.inputValue(),'still pending');
+ assert.ok((await page.locator('body').innerText()).includes('Workspace changed.'));
+ assert.ok(await page.evaluate(k=>localStorage.getItem(k),draftKey));
  assert.equal(mutations,0);console.log('PASS local product UI: persisted conversation/cards, hidden raw diagnostics, historical readonly source and selection refresh, current editable, saved local draft, add/delete draft, zero remote mutation');
 }finally{await browser?.close();await server.close();}

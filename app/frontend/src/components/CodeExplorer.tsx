@@ -29,6 +29,14 @@ export function CodeExplorer({files,readonly=true,revision=0,blocked=false,task,
   setDrafts(remaining);setSaved(false);if(!Object.keys(remaining).length){setBase(null);localStorage.removeItem(key);}
   submitted.current=null;request.current=undefined;
  },[result?.status,files,drafts,key]);
+ // A completed Apply may finish while this tab is closed. Exact confirmed source
+ // equality lets us retire its saved draft without a second mutation or validation.
+ useEffect(()=>{
+  if(readonly||blocked||base===null||revision<base)return;
+  const entries=Object.entries(drafts);
+  if(!entries.length||!entries.every(([p,c])=>c===null?!files.some(f=>f.path===p):files.find(f=>f.path===p)?.content===c))return;
+  setDrafts({});setBase(null);setSaved(false);localStorage.removeItem(key);
+ },[readonly,blocked,base,revision,drafts,files,key]);
  const save=()=>{if(readonly)return;try{localStorage.setItem(key,JSON.stringify({schema:1,base:base??revision,active,drafts}));setSaved(true);}catch{setError('无法保存本地草稿；浏览器存储不可用。');}};
  const change=(path:string,content:string|null)=>{setSaved(false);setNoop(false);setBase(b=>b??revision);setDrafts(d=>({...d,[path]:content}));};
  const add=()=>{const path=newPath.trim().replaceAll('\\','/');
