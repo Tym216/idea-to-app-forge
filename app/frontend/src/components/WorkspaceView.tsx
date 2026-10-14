@@ -75,7 +75,9 @@ export function WorkspaceView(props: Props) {
   const [versionError,setVersionError]=useState('');
   const versionRequest=useRef(0);
   const restoreRequests=useRef(new Map<string,string>());
-  const [restorePending,setRestorePending]=useState(false),[restoreNotice,setRestoreNotice]=useState('');
+  const [restorePending,setRestorePending]=useState(false),[restoreNotice,setRestoreNotice]=useState(''),[restoreTaskId,setRestoreTaskId]=useState('');
+  const restoreTask=tasks.find(t=>t.id===restoreTaskId);
+  const restoreStatus=restoreTask?.status==='succeeded'?'已恢复源码并创建新版本；请查看版本卡片的检查结论。':restoreTask?.status==='failed'?'恢复未完成；已确认的源码保留，可查看任务详情并重试。':restoreTask?.status==='paused'?'恢复已暂停，代码与进度保留。':restoreNotice;
   const restoreBlocked=activeTask(tasks)||project?.workspace_state!=='confirmed'||!!project?.workspace_writer||!!props.recoveryPending||['queued','running'].includes(props.recovery?.status??'')||restorePending;
   const restore=async(v:AppVersion)=>{
    if(!props.onRestore||!project||restoreBlocked)return;
@@ -84,6 +86,7 @@ export function WorkspaceView(props: Props) {
    if(!restoreRequests.current.has(key))restoreRequests.current.set(key,crypto.randomUUID());
    setRestorePending(true);setRestoreNotice('');
    try{const receipt=await props.onRestore(v.id,restoreRequests.current.get(key)!,project.workspace_revision??0);
+    setRestoreTaskId(receipt.noop?'':receipt.task_id);
     setRestoreNotice(receipt.noop?'当前源码已与该版本一致；未创建新 revision 或版本。':'恢复已提交，Worker 正在应用并检查；完成后才创建新版本。');
     if(!receipt.noop)void viewVersion(null);
    }catch(e){setRestoreNotice(e instanceof Error?e.message:'恢复未提交，请刷新后重试。');}finally{setRestorePending(false);}
@@ -247,7 +250,7 @@ export function WorkspaceView(props: Props) {
               recovery={props.recovery?.sandbox_id === project?.sandbox_id && props.recovery?.project_id === project?.id ? props.recovery : null}
               recoveryError={props.recoveryError} recoveryPending={props.recoveryPending} onRecover={props.onRecoverPreview} />}
             {versionError&&<p role="alert">{versionError}</p>}
-            {restoreNotice&&<p role="status" className="p-2 text-sm">{restoreNotice}</p>}
+            {restoreStatus&&<p role="status" className="p-2 text-sm">{restoreStatus}</p>}
             {tab==='code'&&<div className="p-2 text-xs border-b"> {viewed?'Version '+viewed.version_number+' · 历史源码只读':'Current · Version '+(versions.find(v=>v.id===project?.checkpoint_id)?.version_number??'—')+(workingDraft?' · 有未发布修改':'')}
               {viewed&&<button className="ml-3" onClick={()=>void viewVersion(null)}>查看 Current</button>}
               {viewed&&props.onRestore&&<button className="ml-3" disabled={restoreBlocked} onClick={()=>void restore(viewed)}>恢复此版本到当前工作区</button>}
