@@ -1,3 +1,4 @@
+import {WorkspaceRenderDiagnostics} from './WorkspaceErrorBoundary';
 import {ConversationTimeline} from './ConversationTimeline';
 import {getAppVersion} from '@/lib/data';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
@@ -176,6 +177,7 @@ export function WorkspaceView(props: Props) {
                 onVersion={id=>void viewVersion(id)} onChanged={onChanged}/>
               <details className="px-4 pb-3"><summary>开发者诊断与任务详情</summary>
                <TaskPanel current={current} history={history} onChanged={onChanged} retry={actions.retry}/>
+               <WorkspaceRenderDiagnostics projectId={project?.id}/>
               </details>
               <div ref={bottomRef}/>
               {memory}

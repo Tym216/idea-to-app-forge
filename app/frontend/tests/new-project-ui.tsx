@@ -1,0 +1,2 @@
+import '../src/index.css';
+import React from 'react';import {createRoot} from 'react-dom/client';import {MemoryRouter,Routes,Route} from 'react-router-dom';import Projects from '../src/pages/Projects';import Workspace from '../src/pages/Workspace';createRoot(document.getElementById('root')!).render(<MemoryRouter><Routes><Route path="/" element={<Projects/>}/><Route path="/workspace/:projectId" element={<Workspace/>}/></Routes></MemoryRouter>);

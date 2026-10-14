@@ -19,12 +19,17 @@ import {
 } from '@/lib/data';
 import { WorkspaceView, type Mode } from '@/components/WorkspaceView';
 import {useSession} from '@/hooks/useSession';
+import {WorkspaceErrorBoundary} from '@/components/WorkspaceErrorBoundary';
 import { MemoryPanel } from '@/components/MemoryPanel';
 
 /** 工作区:数据读取与提交;任务由服务端 Worker 推进,前端轮询读取,刷新后状态完整保留。 */
 export default function Workspace() {
   const { projectId = '' } = useParams();
-  return <ProjectWorkspace key={projectId} projectId={projectId}/>;
+  const navigate=useNavigate();
+  const [params]=useSearchParams();
+  const recover=()=>{const next=new URLSearchParams(params);next.delete('prompt');
+   navigate({pathname:'/workspace/'+projectId,search:next.toString()},{replace:true});};
+  return <WorkspaceErrorBoundary key={projectId} projectId={projectId} onRecover={recover} onBack={()=>navigate('/')}><ProjectWorkspace projectId={projectId}/></WorkspaceErrorBoundary>;
 }
 function ProjectWorkspace({projectId}:{projectId:string}) {
   const navigate = useNavigate();
@@ -42,6 +47,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   const [feedback, setFeedback] = useState<PlanFeedback[]>([]);
   const [error, setError] = useState('');
   const autoSubmitted = useRef(false);
+  const refreshRequest=useRef<Promise<void>|null>(null);
   const checkedWriters=useRef(new Set<string>());
   const recoveryRequest=useRef<Promise<void>|null>(null);
   const readFailures=useRef(0);
@@ -67,7 +73,9 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
     return operation;
   },[projectId]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(() => {
+    if(refreshRequest.current)return refreshRequest.current;
+    const operation=(async()=>{
     try {
       const before = await getProject(projectId);
       setPreviewProject(previous=>previous??before);
@@ -95,6 +103,10 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+    })();
+    refreshRequest.current=operation;
+    void operation.finally(()=>{if(refreshRequest.current===operation)refreshRequest.current=null;});
+    return operation;
   }, [projectId]);
 
   useEffect(() => {
