@@ -507,6 +507,57 @@ await assert.rejects(as('authenticated',userId,'select public.ita_submit_user_ap
 assert.equal((await svc("select has_function_privilege('authenticated','public.ita_submit_user_apply(uuid,text,bigint,jsonb,text)','EXECUTE') a,has_function_privilege('service_role','public.ita_submit_user_apply(uuid,text,bigint,jsonb,text)','EXECUTE') s"))[0].s,false);
 console.log('PASS editor intent: atomic user message/task, same-input idempotency, changed-intent conflict, old four-argument compatibility, no new authority');
 
+
+await db.exec(readFileSync(new URL('../migrations/0012_restore_app_version.sql',import.meta.url),'utf8'));
+const restoreProduct=(key,rev,target)=>as('authenticated',userId,'select public.ita_restore_app_version($1,$2,$3,$4) r',[productId,target,key,rev]).then(rows=>rows[0].r);
+await assert.rejects(restoreProduct('busy',3,productV2.snapshot_id),/RECONCILE|BUSY/);
+await applyProduct(intentReceipt,[{path:'src/a.ts',content:'B'}]);
+const productV4=await publishProduct('product-v4',4,[{path:'src/a.ts',content:'B'}]);
+await assert.rejects(restoreProduct('stale',3,productV2.snapshot_id),/REVISION_CONFLICT/);
+await assert.rejects(as('authenticated',randomUUID(),'select public.ita_restore_app_version($1,$2,$3,$4)',[productId,productV2.snapshot_id,'foreign',4]),/NOT_OWNED/);
+const foreignCheckpoint=(await svc("select id from public.ita_snapshots where project_id<>$1 and kind='checkpoint' limit 1",[productId]))[0].id;
+await assert.rejects(restoreProduct('foreign-target',4,foreignCheckpoint),/TARGET_INVALID/);
+const beforeRestoreNoop=(await svc("select (select count(*) from public.ita_tasks where project_id=$1) tasks,(select count(*) from public.ita_changesets where project_id=$1) changes,(select count(*) from public.ita_snapshots where project_id=$1) versions",[productId]))[0];
+assert.deepEqual(await restoreProduct('same-source',4,productV4.snapshot_id),{accepted:true,noop:true});
+assert.deepEqual((await svc("select (select count(*) from public.ita_tasks where project_id=$1) tasks,(select count(*) from public.ita_changesets where project_id=$1) changes,(select count(*) from public.ita_snapshots where project_id=$1) versions",[productId]))[0],beforeRestoreNoop);
+await svc("update public.ita_tasks set status='paused' where id=$1",[intentReceipt.task_id]);
+await assert.rejects(restoreProduct('paused',4,productV2.snapshot_id),/PROJECT_BUSY/);
+await svc("update public.ita_tasks set status='running',lease_until=now()+interval '1 hour' where id=$1",[intentReceipt.task_id]);
+const runtimeWriter=await productCall('ita_workspace_acquire',[randomUUID(),'verify','product-sb',null],['uuid','text','text','uuid']);
+await assert.rejects(restoreProduct('writer',4,productV2.snapshot_id),/RECONCILE/);
+await productCall('ita_workspace_finish_operation',[runtimeWriter.token,hash([{path:'src/a.ts',content:'B'}])],['uuid','text']);
+await svc("update public.ita_tasks set status='succeeded',lease_until=null where id=$1",[intentReceipt.task_id]);
+// A normal Agent change creates a file. Restore may remove it only because the owned snapshot excludes it.
+const agentExec=randomUUID(),agentTask=(await svc("insert into public.ita_tasks(project_id,user_id,mode,prompt,plan_id,plan_version,kind,retry_of) values($1,$2,'build','新增辅助文件',$3,1,'resume',$4) returning id",[productId,userId,productPlan,productTask]))[0].id;
+productScope=[productId,agentTask,'w',agentExec];
+await svc("update public.ita_tasks set status='running',worker_id='w',execution_id=$1,lease_until=now()+interval '1 hour' where id=$2",[agentExec,agentTask]);
+const agentFiles=[{path:'src/a.ts',content:'B'},{path:'src/agent-extra.ts',content:'extra'}];
+const agentChange=await productCall('ita_workspace_prepare',['agent-extra','agent',4,JSON.stringify([{operation:'write',path:'src/agent-extra.ts',content:'extra'}]),hash(agentFiles)],['text','text','bigint','jsonb','text']);
+const agentWriter=await productCall('ita_workspace_acquire',[randomUUID(),'mutation','product-sb',agentChange.id],['uuid','text','text','uuid']);
+await productCall('ita_workspace_commit',[agentWriter.token,agentChange.id,JSON.stringify(agentFiles),hash(agentFiles)],['uuid','uuid','jsonb','text']);
+const productV5=await publishProduct('product-v5',5,agentFiles);
+const restored=await restoreProduct('restore-v2',5,productV2.snapshot_id);
+assert.equal((await restoreProduct('restore-v2',5,productV2.snapshot_id)).task_id,restored.task_id);
+await assert.rejects(restoreProduct('restore-v2',5,productV1.snapshot_id),/REQUEST_CONFLICT/);
+const restoreChange=(await svc('select * from public.ita_changesets where id=$1',[restored.changeset_id]))[0];
+assert.equal(restoreChange.actor,'user');assert.equal(restoreChange.origin,'user_apply');
+assert.equal(restoreChange.submission_basis.restore_checkpoint_id,productV2.snapshot_id);
+assert.equal(restoreChange.submission_basis.checkpoint_id,productV5.snapshot_id);
+assert.ok(restoreChange.changes.some(c=>c.path==='src/agent-extra.ts'&&c.operation==='delete'));
+assert.ok(restoreChange.changes.some(c=>c.path==='src/note.ts'&&c.operation==='write'));
+assert.equal((await svc('select operation,prompt from public.ita_tasks where id=$1',[restored.task_id]))[0].operation,'user_apply');
+await assert.rejects(svc("update public.ita_changesets set submission_basis=submission_basis||jsonb_build_object('restore_checkpoint_id',gen_random_uuid()) where id=$1",[restored.changeset_id]),/IMMUTABLE|permission denied/);
+await applyProduct(restored,withNote);
+const productV6=await publishProduct('restored-v2',6,withNote);
+assert.equal(productV6.version_number,6);
+assert.equal((await svc('select parent_checkpoint_id from public.ita_snapshots where id=$1',[productV6.snapshot_id]))[0].parent_checkpoint_id,productV5.snapshot_id);
+assert.deepEqual((await svc('select files from public.ita_snapshots where id=$1',[productV2.snapshot_id]))[0].files.map(f=>({path:f.path,content:f.content})),withNote);
+assert.deepEqual((await svc('select path,content from public.ita_files where project_id=$1 and not deleted order by path',[productId])),withNote);
+assert.equal((await restoreProduct('restore-v2',5,productV2.snapshot_id)).task_id,restored.task_id);
+await assertForgeTablePrivileges(db);
+for(const role of ['anon','service_role'])assert.equal((await svc("select has_function_privilege($1,'public.ita_restore_app_version(uuid,uuid,text,bigint)','EXECUTE') ok",[role]))[0].ok,false);
+console.log('PASS historical restore SQL: owned immutable snapshot diff, agent-file delete only through restore, task/writer/unresolved/stale fences, immutable submission, idempotency and request conflict, zero-op, fresh revision/new child version, unchanged historical snapshots and source authority');
+
 await db.close();
 console.log('PASS Demo SQL: numbered versions/legacy parent/immutable metadata/completion-key repeat/approval separation; User Apply ownership/active task+writer+preview/unresolved/idempotency/stale/input authority; preview revision receipt/cache invalidation (single-connection PGlite, not a dual-connection concurrency proof)');
 console.log('PASS workspace SQL: canonical hash, source privilege cutover, RLS, lease/epoch, partial recovery, no-op, stale conflict, evidence reuse, blocker/tool-error, immutable idempotent checkpoint, legacy multi-intent committed/not_applied exit, authority ACLs, third-hash rejection, completion identity, DELETE immutability, cascade (single-connection PGlite; not concurrency proof)');

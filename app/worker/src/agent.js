@@ -261,7 +261,9 @@ async function runTool(ctx, tool, args) {
           observation:installRequired?'依赖安装 REQUIRED':'依赖未变化，跳过安装 SKIPPED_UNCHANGED',
           result:{status:installRequired?'REQUIRED':'SKIPPED_UNCHANGED',reason:ctx.userApplyPolicy.escalationReason|| (installRequired?'dependencies_missing':null)}});
         if(installRequired){
-          const installed=await ctx.workspace.runtime('install',()=>runCommand(sandbox,sandboxId,INSTALL_CMD),{adoptLockfile:true});
+          // A historical lockfile pins dependency versions; restore it with ci rather than rewriting it.
+          const installCommand=ctx.userApplyPolicy?.restore&&ctx.workspace.manifest.files.some(f=>f.path==='package-lock.json')?'npm ci --no-audit --no-fund --ignore-scripts':INSTALL_CMD;
+          const installed=await ctx.workspace.runtime('install',()=>runCommand(sandbox,sandboxId,installCommand),{adoptLockfile:true});
           ctx.contextRevision=ctx.workspace.state.revision;
           if(installed.exitCode!==0)return {observation:formatResult(installed),ok:false};
         }
@@ -771,7 +773,7 @@ export async function executeTask(task) {
         const policy=userApplyPolicy(snapshot.files,workspace.manifest.files);
         // Compare requested target too, before mutation; committed resumes use their actual current source.
         const target=change.status==='committed'?workspace.manifest:applySourceChanges(workspace.manifest,change.changes);
-        Object.assign(policy,userApplyPolicy(snapshot.files,target.files));
+        Object.assign(policy,userApplyPolicy(snapshot.files,target.files,change.changes),{restore:!!frozen.restore_checkpoint_id});
         return { plan, acceptance, buildBasis, verifyBasis:policy.mode==='health'?healthBasis:fullBasis, userApplyPolicy:policy };
       },
       validateAndComplete: async (basis) => {

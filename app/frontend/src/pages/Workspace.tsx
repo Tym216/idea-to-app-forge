@@ -6,7 +6,7 @@ import type { AppVersion, Message, Plan, PlanFeedback, PreviewRecovery, Project,
 import {
   exportProjectZip,
   listAppVersions,
-  submitUserApply,
+  submitUserApply, restoreAppVersion,
   getProject,
   getPreviewRecovery,
   requestPreviewRecovery,
@@ -155,6 +155,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
       viewingVersionId={searchParams.get('version')}
       onViewingVersion={id=>{const next=new URLSearchParams(searchParams);if(id)next.set('version',id);else next.delete('version');setSearchParams(next,{replace:true});}}
       onApply={async(input)=>{const receipt=await submitUserApply(projectId,input);await refresh();return receipt;}}
+      onRestore={async(id,requestId,baseRevision)=>{const receipt=await restoreAppVersion(projectId,id,requestId,baseRevision);await refresh();return receipt;}}
       messages={messages}
       files={files}
       tasks={tasks}

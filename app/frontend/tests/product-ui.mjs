@@ -47,5 +47,16 @@ await conversation.getByText('把背景改成蓝色',{exact:true}).waitFor();
  assert.equal(await editor.inputValue(),'still pending');
  assert.ok((await page.locator('body').innerText()).includes('Workspace changed.'));
  assert.ok(await page.evaluate(k=>localStorage.getItem(k),draftKey));
+
+ await page.getByRole('button',{name:'Reload / discard draft'}).click();
+ await page.getByRole('tab',{name:'App Versions',exact:true}).click();
+ assert.equal(await page.getByRole('button',{name:'恢复 App v2 到当前工作区',exact:true}).isEnabled(),false);
+ page.once('dialog',dialog=>dialog.dismiss());await page.getByRole('button',{name:'恢复 App v1 到当前工作区',exact:true}).click();
+ assert.deepEqual(JSON.parse(await page.getByTestId('restorations').textContent()),[]);
+ page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'恢复 App v1 到当前工作区',exact:true}).click();
+ const restores=JSON.parse(await page.getByTestId('restorations').textContent());assert.equal(restores.length,1);assert.equal(restores[0].id,'v1');assert.equal(restores[0].baseRevision,2);assert.ok(restores[0].requestId);
+ await page.getByText('恢复已提交，Worker 正在应用并检查；完成后才创建新版本。',{exact:true}).waitFor();
+ assert.equal(await page.getByRole('textbox',{name:'编辑 src/App.tsx'}).inputValue(),'Blue string');
+ assert.equal(await page.getByTestId('submissions').textContent(),'0');
  assert.equal(mutations,0);console.log('PASS local product UI: persisted conversation/cards, hidden raw diagnostics, historical readonly source and selection refresh, current editable, saved local draft, add/delete draft, zero remote mutation');
 }finally{await browser?.close();await server.close();}

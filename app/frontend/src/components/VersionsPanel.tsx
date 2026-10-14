@@ -3,8 +3,8 @@ import { useRef, useState } from 'react';
 import type { AppVersion, ProjectFile } from '@/lib/supabase';
 import { getAppVersion } from '@/lib/data';
 import { CodeExplorer } from './CodeExplorer';
-export function VersionsPanel({versions,currentId,workingDraft,onSelect,load=getAppVersion}:{
- versions:AppVersion[];currentId?:string|null;workingDraft:boolean;onSelect?:(id:string)=>void;load?:typeof getAppVersion}) {
+export function VersionsPanel({versions,currentId,workingDraft,onSelect,onRestore,restoreBlocked=false,load=getAppVersion}:{
+ versions:AppVersion[];currentId?:string|null;workingDraft:boolean;onSelect?:(id:string)=>void;onRestore?:(v:AppVersion)=>void;restoreBlocked?:boolean;load?:typeof getAppVersion}) {
  const [selected,setSelected]=useState<AppVersion|null>(null);
  const [error,setError]=useState('');const [loading,setLoading]=useState(false);
  const request=useRef(0);
@@ -13,8 +13,10 @@ export function VersionsPanel({versions,currentId,workingDraft,onSelect,load=get
  return <div className="h-full flex flex-col min-h-0">
   <div className="p-3 text-sm">{workingDraft && <p>工作区正在处理或含未发布修改。预览展示 Working Workspace，不代表 Current App Version。</p>}
    {versions.length===0 && <p>还没有编号的 App Version。历史 legacy checkpoint 不会被伪造为 v0。</p>}
-   {versions.map(v=><button className="btn-ghost px-3 py-2" key={v.id} onClick={()=>onSelect?onSelect(v.id):void pick(v.id)}>
-    App v{v.version_number}{v.id===currentId ? ' · Current' : ''} · {versionTitle(v)}</button>)}
+   {versions.map(v=><div key={v.id} className="flex gap-2 items-center flex-wrap">
+    <button className="btn-ghost px-3 py-2" onClick={()=>onSelect?onSelect(v.id):void pick(v.id)}>App v{v.version_number}{v.id===currentId?' · Current':''} · {versionTitle(v)}</button>
+    {onRestore&&<button className="btn-ghost px-3 py-2 text-xs" aria-label={'恢复 App v'+v.version_number+' 到当前工作区'} disabled={restoreBlocked||(v.id===currentId&&!workingDraft)} onClick={()=>onRestore(v)}>恢复到当前工作区</button>}
+   </div>)}
    {loading && <p role="status">读取版本源码…</p>}{error && <p role="alert">{error}</p>}
    {selected && <p>App v{selected.version_number} · revision {selected.workspace_revision} · 验收：{selected.verify_evidence?.status ?? '未验证'} · 历史源码只读。Code Version 不回滚业务数据。</p>}
   </div>

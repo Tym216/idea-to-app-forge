@@ -3,9 +3,11 @@ import {RUNNER_SOURCE,PLAYWRIGHT_VERSION,classifyResult} from './verify.js';
 const dependencyPath=p=>/(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|\.npmrc|\.yarnrc(?:\.yml)?|pnpm-workspace\.yaml)$/.test(p);
 const runtimePath=p=>/(^|\/)(vite\.config\.[^/]+|tsconfig(?:\.[^/]+)?\.json|index\.html)$/.test(p);
 const selectedHash=(files,match)=>fingerprint(files.filter(f=>match(f.path)).map(f=>[f.path,sha256(f.content)]).sort(([a],[b])=>a.localeCompare(b)));
-export function userApplyPolicy(stableFiles,targetFiles){
- const dependencyChanged=selectedHash(stableFiles,dependencyPath)!==selectedHash(targetFiles,dependencyPath);
- const runtimeChanged=selectedHash(stableFiles,runtimePath)!==selectedHash(targetFiles,runtimePath);
+export function userApplyPolicy(stableFiles,targetFiles,changes=[]){
+ // Immutable recorded diffs retain install/restart requirements across committed resumes.
+ const touched=match=>changes.some(c=>c.before_hash!==c.after_hash&&match(c.path));
+ const dependencyChanged=touched(dependencyPath)||selectedHash(stableFiles,dependencyPath)!==selectedHash(targetFiles,dependencyPath);
+ const runtimeChanged=touched(runtimePath)||selectedHash(stableFiles,runtimePath)!==selectedHash(targetFiles,runtimePath);
  return {install:dependencyChanged?'REQUIRED':'SKIPPED_UNCHANGED',mode:dependencyChanged||runtimeChanged?'full':'health',
  escalationReason:dependencyChanged?'dependency_inputs_changed':runtimeChanged?'runtime_config_changed':null};
 }

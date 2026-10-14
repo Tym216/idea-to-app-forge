@@ -19,14 +19,14 @@ test('health evidence is distinct from feature acceptance; no fabricated passed 
  assert.equal(userApplyHealthResult({...healthy,base:{...healthy.base,chars:0,visible:0}},acceptance).kind,'blocker');
  assert.equal(userApplyHealthResult({toolError:'broken browser'},acceptance).kind,'tool_error');
 });
-async function fixture({dependency=false,dead=false,compileFail=false,renderFail=false}={}){
- const commands=[],steps=[],calls=[],evidences=[],manifest=sourceManifest(files);let port=!dead,started=0;
+async function fixture({dependency=false,dead=false,compileFail=false,renderFail=false,restore=false}={}){
+ const commands=[],steps=[],calls=[],evidences=[],manifest=sourceManifest(restore?[...files,{path:'package-lock.json',content:'{}'}]:files);let port=!dead,started=0;
  const sb={workdir:'/app',readFile:async(_id,path)=>files.find(f=>f.path===path)?.content,listFiles:async()=>files.map(f=>f.path),
  exec:async(_id,cmd)=>{commands.push(cmd);if(cmd.includes('curl'))return {exitCode:0,stdout:'200'};return {exitCode:cmd==='npm run --ignore-scripts build'&&compileFail?1:0,stdout:'ok',stderr:''};},
  isPortListening:async()=>port,startBackground:async()=>{started++;port=true;return {commandId:'dev'};},readLogs:async()=>'',previewUrl:async()=>{throw Error('healthy saved URL must not be resolved');}};
  const ws={state:{revision:3},manifest,assertCurrent:async r=>assert.equal(r,3),runtime:async(kind,fn)=>{calls.push(kind);return fn();},valid:()=>false,evidence:async(...args)=>evidences.push(args)};
  const task={id:'t',project_id:'p',user_id:'u',steps,tool_steps:0,fix_rounds:0};
- const basis={acceptance,buildBasis:buildFingerprint({command:'build'}),verifyBasis:'health',userApplyPolicy:{install:dependency?'REQUIRED':'SKIPPED_UNCHANGED',mode:dependency?'full':'health',escalationReason:dependency?'dependency_inputs_changed':null}};
+ const basis={acceptance,buildBasis:buildFingerprint({command:'build'}),verifyBasis:'health',userApplyPolicy:{install:dependency?'REQUIRED':'SKIPPED_UNCHANGED',mode:dependency?'full':'health',escalationReason:dependency?'dependency_inputs_changed':null,restore}};
  const oldFetch=globalThis.fetch;globalThis.fetch=async()=>({ok:true});
  try{const result=await runDeterministicValidation(task,sb,'s',ws,basis,{checkLease:async()=>{},updateProject:async()=>{},updateTask:async()=>{},appendStep:async(_t,s)=>steps.push(s),
  verifyApp:async input=>{if(dependency)assert.equal(input.checks.length,1);else assert.deepEqual(input.checks,[]);return renderFail?{...healthy,base:{...healthy.base,blocking:['页面异常: crash']}}:dependency?{...healthy,checks:[{id:'A1',status:'pass'}]}:healthy;}},
@@ -45,4 +45,15 @@ test('changed dependencies run normal install and fuller fixed validation; dead 
 });
 test('fatal compile/render errors stop before successful validation/checkpoint without LLM repair',async()=>{
  for(const options of [{compileFail:true},{renderFail:true}])await assert.rejects(fixture(options),e=>{assert.ok(e.fixture);assert.ok(!e.fixture.calls.includes('checkpoint'));return /USER_APPLY_VALIDATION_FAILED|VERIFY/.test(e.code);});
+});
+
+test('recorded dependency/config mutations retain escalation requirements after committed restore resume',()=>{
+ const same=[{path:'package.json',content:'{}'},{path:'src/App.tsx',content:'A'}];
+ assert.equal(userApplyPolicy(same,same,[{path:'package.json',before_hash:'new',after_hash:'old'}]).install,'REQUIRED');
+ assert.equal(userApplyPolicy(same,same,[{path:'vite.config.ts',before_hash:'new',after_hash:'old'}]).mode,'full');
+ assert.equal(userApplyPolicy(same,same,[{path:'package.json',before_hash:'same',after_hash:'same'}]).install,'SKIPPED_UNCHANGED');
+});
+
+test('restore with changed dependencies respects the historical lockfile via controlled npm ci',async()=>{
+ const f=await fixture({dependency:true,restore:true});assert.ok(f.commands.some(c=>c.startsWith('npm ci ')));assert.ok(!f.commands.some(c=>c.startsWith('npm install')));
 });

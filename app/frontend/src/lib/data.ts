@@ -305,6 +305,18 @@ export async function submitUserApply(projectId:string,input:EditSubmission):Pro
  }
  return data;
 }
+export async function restoreAppVersion(projectId:string,checkpointId:string,requestId:string,baseRevision:number):Promise<ApplyReceipt>{
+ const {data,error}=await supabase.rpc('ita_restore_app_version',{p_project_id:projectId,p_checkpoint_id:checkpointId,p_request_id:requestId,p_base_revision:baseRevision});
+ if(error){
+  if(/REVISION_CONFLICT/.test(error.message))throw new Error('工作区已变化，请刷新后重新选择恢复版本。');
+  if(/NOT_OWNED|TARGET_INVALID/.test(error.message))throw new Error('该历史版本不属于当前项目，或源码不可恢复。');
+  if(/CHANGE_LIMIT/.test(error.message))throw new Error('本次恢复涉及超过 32 个文件，超出当前恢复额度。');
+  if(/STABLE_BASIS/.test(error.message))throw new Error('该版本缺少有效的检查依据，无法自动恢复。');
+  throw rpcError(error);
+ }
+ return data;
+}
+
 export async function listAppVersions(projectId:string):Promise<AppVersion[]> {
  const {data,error}=await supabase.from('ita_snapshots')
   .select('id,project_id,version_number,parent_checkpoint_id,label,created_at,workspace_revision,code_hash,basis_id,verify_evidence')

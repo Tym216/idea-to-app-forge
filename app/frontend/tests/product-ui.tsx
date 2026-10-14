@@ -23,9 +23,11 @@ const projectionProof={turns:persisted.length,oneTaskAssistant:persisted.filter(
 function Demo(){
  const [selected,setSelected]=useState(new URLSearchParams(location.search).get('version'));
  const [submissions,setSubmissions]=useState(0);
- return <><output hidden data-testid="projection-proof">{JSON.stringify(projectionProof)}</output><output data-testid="submissions">{submissions}</output><WorkspaceView project={project} files={[{id:'f',project_id:'p',path:'src/App.tsx',content:'Blue string',updated_at:'now'}]}
+ const [restorations,setRestorations]=useState<unknown[]>([]);
+ return <><output hidden data-testid="restorations">{JSON.stringify(restorations)}</output><output hidden data-testid="projection-proof">{JSON.stringify(projectionProof)}</output><output data-testid="submissions">{submissions}</output><WorkspaceView project={project} files={[{id:'f',project_id:'p',path:'src/App.tsx',content:'Blue string',updated_at:'now'}]}
  messages={messages} tasks={tasks} versions={versions} plans={[]} feedback={[]} error="" memory={null} onBack={()=>{}} onExport={()=>{}} onSubmit={async()=>true} onChanged={()=>{}}
  viewingVersionId={selected} onViewingVersion={id=>{setSelected(id);history.replaceState(null,'',id?'?version='+id:location.pathname);}}
+ onRestore={async(id,requestId,baseRevision)=>{setRestorations(r=>[...r,{id,requestId,baseRevision}]);return {accepted:true,task_id:'restore-task',changeset_id:'restore-change'};}}
  onApply={async()=>{setSubmissions(n=>n+1);return {accepted:true,noop:true};}}/></>;
 }
 createRoot(document.getElementById('root')!).render(<Demo/>);

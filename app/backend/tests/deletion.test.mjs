@@ -75,7 +75,7 @@ await svc(`insert into public.ita_snapshots(project_id,user_id,label,files) valu
 
 
 // Upgrade real migrations after legacy fixture creation, so revoked source DML is respected.
-for (const f of ['0004_task_pause.sql', '0005_preview_recovery.sql', '0006_workspace_contract.sql', '0007_app_versions.sql', '0008_user_apply.sql', '0009_preview_basis.sql','0010_product_editor.sql','0011_editor_intent.sql']) {
+for (const f of ['0004_task_pause.sql', '0005_preview_recovery.sql', '0006_workspace_contract.sql', '0007_app_versions.sql', '0008_user_apply.sql', '0009_preview_basis.sql','0010_product_editor.sql','0011_editor_intent.sql','0012_restore_app_version.sql']) {
   await db.exec(readFileSync(new URL(`../migrations/${f}`, import.meta.url), 'utf8'));
   console.log(`已执行 ${f}`);
 }
