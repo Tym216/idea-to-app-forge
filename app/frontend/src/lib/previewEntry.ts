@@ -16,16 +16,20 @@ export function usePreviewEntry({identity,url,pending,canRecover,recover,probe=p
 }) {
  const checks=useRef(new Map<string,Promise<boolean|null>>());
  const attempts=useRef(new Set<string>());
+ const previousPending=useRef(pending);
  const [health,setHealth]=useState<{identity:string;healthy:boolean|null}|null>(null);
  useEffect(()=>{
-  if(!identity||pending)return;
+  if(!identity)return;
+  // A completed recovery can keep the same URL: discard the old failed health read.
+  if(previousPending.current&&!pending)checks.current.delete(identity);
+  previousPending.current=pending;
   let active=true;
   let check=checks.current.get(identity);
   if(!check){check=url?probe(url):Promise.resolve(false);checks.current.set(identity,check);}
   void check.then(healthy=>{
    if(!active)return;
    setHealth({identity,healthy});
-   if(healthy===false&&canRecover)void requestPreviewOnce(identity,attempts.current,recover);
+   if(healthy===false&&!pending&&canRecover)void requestPreviewOnce(identity,attempts.current,recover);
   });
   return ()=>{active=false;};
  },[identity,url,pending,canRecover,recover,probe]);

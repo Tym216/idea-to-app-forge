@@ -1,4 +1,4 @@
-import {usePreviewEntry} from '@/lib/previewEntry';
+import {usePreviewEntry,probePreviewHealth} from '@/lib/previewEntry';
 import { previewRecoveryKey, savedPreviewIdentity } from '@/lib/workspaceState';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
@@ -29,6 +29,8 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [project, setProject] = useState<Project | null>(null);
+  // Preview is read-only and may load before the revision-bracketed editor data.
+  const [previewProject,setPreviewProject]=useState<Project|null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -65,6 +67,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   const refresh = useCallback(async () => {
     try {
       const before = await getProject(projectId);
+      setPreviewProject(previous=>previous??before);
       const [m, f, t, pl, fb, vs, job] = await Promise.all([
         listMessages(projectId), listFiles(projectId), listTasks(projectId),
         listPlans(projectId), listPlanFeedback(projectId), listAppVersions(projectId), getPreviewRecovery(projectId),
@@ -76,6 +79,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
         return;
       }
       setProject(p);
+      setPreviewProject(p);
       setRecovery(job);
       setMessages(m);
       setFiles(f);
@@ -96,19 +100,27 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   }, [refresh]);
 
   const checkingWorkspace=Boolean(project?.workspace_writer&&!tasks.some(t=>['queued','running','paused'].includes(t.status)));
+  const previewSource=previewProject??project;
+  const previewIdentity=savedPreviewIdentity(previewSource,tasks,Boolean(previewSource?.checkpoint_id)||files.length>0);
+  const currentRecovery=recovery?.sandbox_id===previewSource?.sandbox_id&&recovery?.project_id===previewSource?.id?recovery:null;
+  const previewHealthy=usePreviewEntry({identity:previewIdentity,url:previewSource?.preview_url??null,
+    pending:recoveryPending||['queued','running'].includes(currentRecovery?.status??''),
+    canRecover:previewRecoveryKey(project,tasks,files.length>0)!==null,recover:recoverPreview});
+  const savedUrl=previewIdentity&&previewHealthy!==false?previewSource?.preview_url??null:null;
+  const checkAndRefreshPreview=useCallback(async()=>{
+    const url=previewSource?.preview_url;
+    if(url&&(await probePreviewHealth(url))===true)return;
+    if(!recoveryPending&&!['queued','running'].includes(currentRecovery?.status??''))await recoverPreview();
+  },[previewSource?.preview_url,recoveryPending,currentRecovery?.status,recoverPreview]);
+
   useEffect(()=>{
-    if(!checkingWorkspace||!project||['queued','running'].includes(recovery?.status??''))return;
-    const writer=project.workspace_writer as {token?:string};
+    if(!checkingWorkspace||!project||previewHealthy!==false||['queued','running'].includes(recovery?.status??''))return;
+    const writer=project.workspace_writer as {token?:string;kind?:string};
+    if(writer.kind!=='preview')return;
     if(writer.token&&!checkedWriters.current.has(writer.token)){
       checkedWriters.current.add(writer.token);void recoverPreview();
     }
-  },[checkingWorkspace,project,recovery?.status,recoverPreview]);
-  const previewIdentity=savedPreviewIdentity(project,tasks,files.length>0);
-  const currentRecovery=recovery?.sandbox_id===project?.sandbox_id&&recovery?.project_id===project?.id?recovery:null;
-  const previewHealthy=usePreviewEntry({identity:previewIdentity,url:project?.preview_url??null,
-    pending:recoveryPending||['queued','running'].includes(currentRecovery?.status??''),
-    canRecover:previewRecoveryKey(project,tasks,files.length>0)!==null,recover:recoverPreview});
-  const savedUrl=previewIdentity&&previewHealthy!==false?project?.preview_url??null:null;
+  },[checkingWorkspace,project,recovery?.status,recoverPreview,previewHealthy]);
 
   useEffect(() => {
     if (!recovery || !['queued', 'running'].includes(recovery.status)) return;
@@ -170,7 +182,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
       recovery={savedUrl&&previewHealthy===true&&currentRecovery?.status==='failed'?null:currentRecovery}
       recoveryError={recoveryError}
       recoveryPending={recoveryPending}
-      onRecoverPreview={() => void recoverPreview()}
+      onRecoverPreview={() => void checkAndRefreshPreview()}
       memory={<MemoryPanel projectId={projectId} />}
     />
   );

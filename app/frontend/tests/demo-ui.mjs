@@ -9,7 +9,7 @@ const server=await createServer({configFile:false,envDir:false,root,server:{host
  'import.meta.env.VITE_EXPECTED_SUPABASE_PROJECT_REF':JSON.stringify('abcdefghijklmnopqrst'),
  'import.meta.env.VITE_SUPABASE_URL':JSON.stringify('https://abcdefghijklmnopqrst.supabase.co'),
  'import.meta.env.VITE_SUPABASE_ANON_KEY':JSON.stringify('offline-public-key')
-},esbuild:{jsx:'automatic'}});
+},optimizeDeps:{entries:['tests/demo-ui.html']},esbuild:{jsx:'automatic'}});
 let browser;
 try {
  await server.listen();const port=server.httpServer.address().port;

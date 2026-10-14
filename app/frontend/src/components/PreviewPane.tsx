@@ -21,8 +21,9 @@ export function PreviewPane({ label, url, checkingWorkspace, state = 'empty', re
   const [nonce, setNonce] = useState(0);
   const recovering = recoveryPending || recovery?.status === 'queued' || recovery?.status === 'running';
   const transient=/network|fetch|timeout|503|502/i.test(recoveryError || '');
-  const waiting=!!(recovering || transient);
-  const problem=!url&&recovery?.status==='failed' ? recovery.error || '预览恢复失败' : !waiting ? recoveryError || '' : '';
+  // Background metadata/recovery must not tear down an already usable iframe.
+  const waiting=!url&&!!(recovering || transient);
+  const problem=!url&&recovery?.status==='failed' ? recovery.error || '预览恢复失败' : !url&&!waiting ? recoveryError || '' : '';
   if (waiting || problem) return (
     <div className="h-full grid place-items-center p-6" role="status">
       <div className="text-center max-w-[420px]">
@@ -53,7 +54,7 @@ export function PreviewPane({ label, url, checkingWorkspace, state = 'empty', re
       <div className="h-9 px-3 flex items-center gap-2 border-b border-[var(--line)]">
         <span className="text-[11px] text-[var(--accent)] shrink-0">{label ?? 'Working Workspace'}</span>
         <span className="flex-1 truncate font-mono text-[12px] text-[var(--text-2)]">{url}</span>
-        <button type="button" aria-label="检查并刷新预览" onClick={() => onRecover ? onRecover() : setNonce((n) => n + 1)} className="btn-ghost grid h-7 w-7 place-items-center rounded-[6px]">
+        <button type="button" aria-label="检查并刷新预览" onClick={() => { setNonce((n) => n + 1); onRecover?.(); }} className="btn-ghost grid h-7 w-7 place-items-center rounded-[6px]">
           <RotateCw className="h-3.5 w-3.5" />
         </button>
         <a href={url} target="_blank" rel="noreferrer" aria-label="在新窗口打开预览" className="btn-ghost grid h-7 w-7 place-items-center rounded-[6px]">

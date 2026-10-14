@@ -1,7 +1,8 @@
+import {browserVerificationEnabled,httpVerificationFingerprint,runHttpVerification} from './http-verification.js';
 import {userApplyPolicy,userApplyHealthFingerprint,userApplyHealthResult} from './user-apply-validation.js';
 import { savedPreviewHealthy } from './preview-recovery.js';
 import { verificationContinuationCandidate, assertVerificationContinuationBasis } from './verification-continuation.js';
-import { renderPersistenceHelper, PERSISTENCE_GUIDANCE } from './app-persistence.js';
+import { renderPersistenceHelper, PERSISTENCE_GUIDANCE, PERSISTENCE_HOOK_SOURCE } from './app-persistence.js';
 import { assertUserApplyExecution, executeUserApply, userApplyBasis } from './user-apply.js';
 import { validateRuntimeScript } from './workspace-policy.js';
 import { config } from './config.js';
@@ -18,7 +19,7 @@ import { loadMemories, renderMemories, extractMemories, upsertMemory } from './m
 import { AgentStopError, BuildProgress, mayModifyCode, verificationAttempts, requireVerificationBudget, requireNewRevisionForVerification, MAX_VERIFY_ATTEMPTS } from './build-progress.js';
 import { DESIGN_TOKENS_PATH, renderDesignPrompt, renderDesignTokensCss, resolveDesign, wantsDesignChange } from './design.js';
 import { findMissingDependencies, checkSandboxDependencies } from './deps-check.js';
-import { VERIFY_SPEC, RUNNER_SOURCE, PLAYWRIGHT_VERSION, validateChecks, runVerification, classifyResult, formatObservation, composeSummary } from './verify.js';
+import { VERIFY_SPEC, RUNNER_SOURCE, PLAYWRIGHT_VERSION, validateChecks, runVerification, classifyResult, reclassifyStoredVerification, formatObservation, composeSummary } from './verify.js';
 import { withObservation, redact } from './telemetry.js';
 import {
   ACTION_PROMPT, PLAN_PROMPT, applyToolResult, generateStructured, initialStages, markRunning,
@@ -41,6 +42,10 @@ import {
   updateProject,
   updateTask,
 } from './supabase.js';
+
+const verificationMode = () => browserVerificationEnabled(config.browserVerificationEnabled) ? 'full' : 'http';
+const currentVerifyBasis = (acceptance,buildBasis,mode) => mode==='http' ? httpVerificationFingerprint(acceptance,buildBasis)
+  : verifyFingerprint(acceptance,{runnerHash:sha256(RUNNER_SOURCE),playwrightVersion:PLAYWRIGHT_VERSION,buildBasis});
 
 const defaultDeps = { chat, appendStep, updateTask, updateProject, savePlan, addMessage, getLatestPlanVersion, listFiles, checkLease: null };
 
@@ -338,8 +343,14 @@ async function runTool(ctx, tool, args) {
       if (blocked) return { observation: blocked, ok: false };
       if (Object.keys(args).length) return { observation: 'verify 不接受检查参数;检查由已保存的计划版本固定。请用空 args 重试。', ok: false };
       const checks = ctx.acceptance.filter((a) => a.steps?.length).map(({ id, steps }) => ({ id, steps }));
-      const healthOnly=ctx.verificationMode==='health';
-      const validated = healthOnly?{checks:[]}:validateChecks(ctx.acceptance, checks);
+      const healthOnly=ctx.verificationMode==='health',httpOnly=ctx.verificationMode==='http';
+      const validated = healthOnly||httpOnly?{checks:[]}:validateChecks(ctx.acceptance, checks);
+      // Turning off new browser checks cannot erase an already proven blocker on identical source/basis.
+      const previousFull=ctx.workspace?.state.verify;
+      if(httpOnly&&previousFull?.status==='blocker'
+        &&ctx.workspace.valid('verify',currentVerifyBasis(ctx.acceptance,ctx.buildBasis,'full'))
+        &&reclassifyStoredVerification(previousFull.result,ctx.acceptance)?.kind==='blocker')
+        throw new AgentStopError('VERIFY_FAILED','当前源码仍有已确认的阻断问题；需实际修改代码，关闭浏览器验收不能将它改为通过。');
       if (ctx.workspace?.valid('verify', ctx.verifyBasis)) {
         const previous = ctx.workspace.state.verify;
         if (['passed', 'success_with_warnings', 'inconclusive'].includes(previous.status)) {
@@ -352,10 +363,11 @@ async function runTool(ctx, tool, args) {
       if (!ctx.workspace) requireNewRevisionForVerification(task);
       const attempt = verificationAttempts(task.steps) + 1;
       await ctx.deps.appendStep(task, { tool: 'verify_attempt', phase: 'verify', event: 'started',
-        observation: healthOnly?'快速编辑检查：HTTP、渲染与 runtime；不运行功能交互验收':`第 ${attempt}/${MAX_VERIFY_ATTEMPTS} 次浏览器验收；失败后等待用户决定，不自动修复`,result:{mode:healthOnly?'health':'full'} });
-      const verify = () => (ctx.deps.verifyApp || runVerification)({ sandbox, sandboxId, checks: validated.checks });
+        observation: httpOnly?'快速检查：构建 + HTTP；浏览器渲染与功能验收已暂时关闭':healthOnly?'快速编辑检查：HTTP、渲染与 runtime；不运行功能交互验收':`第 ${attempt}/${MAX_VERIFY_ATTEMPTS} 次浏览器验收；失败后等待用户决定，不自动修复`,result:{mode:httpOnly?'http':healthOnly?'health':'full'} });
+      const verify = () => httpOnly ? (ctx.deps.verifyHttpApp || runHttpVerification)({sandbox,sandboxId,acceptance:ctx.acceptance})
+        : (ctx.deps.verifyApp || runVerification)({ sandbox, sandboxId, checks: validated.checks });
       const raw = ctx.workspace ? await ctx.workspace.runtime('verify', verify) : await verify();
-      const result = healthOnly?userApplyHealthResult(raw,ctx.acceptance):classifyResult(raw, ctx.acceptance);
+      const result = httpOnly?raw:healthOnly?userApplyHealthResult(raw,ctx.acceptance):classifyResult(raw, ctx.acceptance);
       if (ctx.workspace) await ctx.workspace.evidence('verify', ctx.verifyBasis, result.kind, result);
       ctx.verificationResult = result;
       progress.recordVerification(result);
@@ -395,7 +407,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
   const history = [
     {
       role: 'system',
-      content: `你是一个在隔离沙箱中工作的编码代理,用 ReAct 模式逐步完成任务。\n${TOOLS_SPEC}${fusionEnabled ? `\n${FUSION_SPEC}` : ''}${designPrompt ? `\n\n${designPrompt}` : ''}`,
+      content: `你是一个在隔离沙箱中工作的编码代理,用 ReAct 模式逐步完成任务。\n${verificationMode()==='http'?'当前为快速模式：verify 只做构建/HTTP 检查，不启动浏览器；功能必须如实写未验收。\n':''}${TOOLS_SPEC}${fusionEnabled ? `\n${FUSION_SPEC}` : ''}${designPrompt ? `\n\n${designPrompt}` : ''}`,
     },
     { role: 'user', content: context },
   ];
@@ -403,12 +415,16 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
   const ctx = { task, sandbox, sandboxId, progress, existingPreviewUrl: project.sandbox_id === sandboxId ? project.preview_url : null, previewUrl: '',
     deps: { ...deps, checkLease: deps.checkLease || (() => ensureLease(task.id)) },
     acceptance: canonicalAcceptance, verificationResult: null, fusionEnabled, runtimePolicy, workspace: options.workspace,
-    contextRevision: options.workspace?.state.revision, buildBasis: options.buildBasis, verifyBasis: options.verifyBasis };
+    contextRevision: options.workspace?.state.revision, buildBasis: options.buildBasis, verifyBasis: options.verifyBasis,
+    verificationMode:options.verificationMode??verificationMode() };
   if (ctx.workspace?.valid('build', ctx.buildBasis) && ctx.workspace.state.build.status === 'passed') progress.recordBuild(true);
 
 
   const stages = Array.isArray(task.plan) && task.plan.length && task.plan[0]?.key ? task.plan : initialStages();
   task.plan = stages;
+  if(ctx.verificationMode==='http'){
+    const stage=stages.find(s=>s.key==='verify');if(stage)stage.label='服务检查（功能未验收）';
+  }
 
   let invalidResponses = 0;
   while (task.tool_steps < config.maxToolSteps) {
@@ -735,7 +751,7 @@ export async function executeTask(task) {
     const acceptance = validateAcceptance(plan.content.acceptance);
     const buildBasis = buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId));
     assertVerificationContinuationBasis(task, workspace, plan, acceptance, buildBasis);
-    const verifyBasis = verifyFingerprint(acceptance, { runnerHash: sha256(RUNNER_SOURCE), playwrightVersion: PLAYWRIGHT_VERSION, buildBasis });
+    const verifyBasis = currentVerifyBasis(acceptance,buildBasis,verificationMode());
     const result = await runDeterministicValidation(task, sandbox, sandboxId, workspace,
       { plan, acceptance, buildBasis, verifyBasis }, deps,
       { summary: '继续固定验收，源码未修改。', stageNote: '继续已构建应用的固定验收；无模型调用' });
@@ -767,14 +783,16 @@ export async function executeTask(task) {
         const buildBasis = buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId));
         const fullBasis = verifyFingerprint(acceptance, { runnerHash: sha256(RUNNER_SOURCE), playwrightVersion: PLAYWRIGHT_VERSION, buildBasis });
         const healthBasis=userApplyHealthFingerprint(acceptance,buildBasis);
-        if (buildBasis !== frozen.build_basis || ![fullBasis,healthBasis].includes(frozen.verify_basis))
+        const httpBasis=httpVerificationFingerprint(acceptance,buildBasis);
+        if (buildBasis !== frozen.build_basis || ![fullBasis,healthBasis,httpBasis].includes(frozen.verify_basis))
           throw sourceError('WORKSPACE_BASIS_INVALID', 'Stable validation basis is not compatible with this runtime; Apply stopped');
         const snapshot=await getCheckpointSource(frozen.checkpoint_id,task.project_id);
         const policy=userApplyPolicy(snapshot.files,workspace.manifest.files);
         // Compare requested target too, before mutation; committed resumes use their actual current source.
         const target=change.status==='committed'?workspace.manifest:applySourceChanges(workspace.manifest,change.changes);
         Object.assign(policy,userApplyPolicy(snapshot.files,target.files,change.changes),{restore:!!frozen.restore_checkpoint_id});
-        return { plan, acceptance, buildBasis, verifyBasis:policy.mode==='health'?healthBasis:fullBasis, userApplyPolicy:policy };
+        if(verificationMode()==='http')policy.mode='http';
+        return { plan, acceptance, buildBasis, verifyBasis:policy.mode==='http'?httpBasis:policy.mode==='health'?healthBasis:fullBasis, userApplyPolicy:policy };
       },
       validateAndComplete: async (basis) => {
         const result = await runDeterministicValidation(task, sandbox, sandboxId, workspace, basis, deps,
@@ -818,16 +836,18 @@ export async function executeTask(task) {
   await updateTask(task.id, { phase: 'sandbox' });
   await hydrateSandbox(workspace);
   if (!workspace.manifest.files.some((f) => f.path === 'src/forge-persistence.ts')) await workspace.apply([{ operation: 'write', path: 'src/forge-persistence.ts', content: renderPersistenceHelper(config.environmentId, task.project_id) }], { origin: 'scaffold' });
+  if (!workspace.manifest.files.some((f) => f.path === 'src/forge-use-app-state.ts')) await workspace.apply([{ operation: 'write', path: 'src/forge-use-app-state.ts', content: PERSISTENCE_HOOK_SOURCE }], { origin: 'scaffold' });
   const preserveDesign = preserveIterationDesign(project, basis.plan, task.prompt)
     && workspace.manifest.files.some(f=>f.path===DESIGN_TOKENS_PATH);
   if (!preserveDesign) await workspace.apply([{ operation: 'write', path: DESIGN_TOKENS_PATH, content: renderDesignTokensCss(design) }], { origin: 'design' });
   const runtime = await buildRuntimeBasis(sandbox, sandboxId);
   const buildBasis = buildFingerprint(runtime);
-  const verifyBasis = verifyFingerprint(basis.acceptance, { runnerHash: sha256(RUNNER_SOURCE), playwrightVersion: PLAYWRIGHT_VERSION, buildBasis });
+  const mode=verificationMode();
+  const verifyBasis = currentVerifyBasis(basis.acceptance,buildBasis,mode);
   await updateTask(task.id, { phase: 'react' });
   const { summary, previewUrl, verificationKind } = await runBuild(
     task, project, sandbox, sandboxId, context, deps, `${basis.prompt}\n\n${preserveDesign ? ITERATION_DESIGN_PROMPT : renderDesignPrompt(design)}`, basis.acceptance,
-    { planChars: basis.prompt.length, runtimePolicy: webValidationPolicy(basis.plan, config.actionFusionEnabled), workspace, buildBasis, verifyBasis }
+    { planChars: basis.prompt.length, runtimePolicy: webValidationPolicy(basis.plan, config.actionFusionEnabled), workspace, buildBasis, verifyBasis, verificationMode:mode }
   );
 
   await extractMemories({ userId: task.user_id, projectId: task.project_id, userPrompt: task.prompt, summary, taskId: task.id });
@@ -859,7 +879,10 @@ export async function runDeterministicValidation(task, sandbox, sandboxId, works
   const progress = new BuildProgress({ maxFixRounds: config.maxFixRounds, fixRounds: task.fix_rounds || 0 });
   const ctx = { task, sandbox, sandboxId, workspace, progress, deps, acceptance: basis.acceptance,
     buildBasis: basis.buildBasis, verifyBasis: basis.verifyBasis, contextRevision: workspace.state.revision,
-    existingPreviewUrl, userApplyPolicy:basis.userApplyPolicy, verificationMode:basis.userApplyPolicy?.mode, previewUrl: '', verificationResult: null, fusionEnabled: false, runtimePolicy: { workflow: 'manual', afterBuildSuccess: [] } };
+    existingPreviewUrl, userApplyPolicy:basis.userApplyPolicy, verificationMode:verificationMode()==='http'?'http':basis.userApplyPolicy?.mode, previewUrl: '', verificationResult: null, fusionEnabled: false, runtimePolicy: { workflow: 'manual', afterBuildSuccess: [] } };
+  if(ctx.verificationMode==='http'){
+    const stage=task.plan.find(s=>s.key==='verify');if(stage)stage.label='服务检查（功能未验收）';
+  }
   if (task.tool_steps + 3 > config.maxToolSteps) throw new AgentStopError('TOOL_STEP_LIMIT', 'Validation budget exhausted; source preserved');
   for (const tool of ['build', 'start_dev', 'verify']) {
     const result = await executeOperation(ctx, tool, {}, true);

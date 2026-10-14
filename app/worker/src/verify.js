@@ -337,12 +337,12 @@ export function classifyResult(result, acceptance) {
 }
 
 export function formatObservation(v, round, maxRounds) {
-  if (v.kind === 'tool_error') return '浏览器验收环境故障，本次无法判断应用。详细原因已保存在开发者诊断中。';
+  if (v.kind === 'tool_error') return (v.validationMode==='http'?'HTTP 检查':'浏览器验收')+'环境故障，本次无法判断应用。详细原因已保存在开发者诊断中。';
   const heading = { passed: '应用已生成并可以预览。验收全部通过。',
     blocker: '应用存在阻断问题，任务不能标记完成。',
     inconclusive: '应用可以预览；部分交互尚未得到自动验收结论。',
     success_with_warnings: '应用已生成并可以预览。自动验收发现非阻塞警告，你仍可以打开预览继续测试。' }[v.kind];
-  const lines = [heading, '第 ' + round + '/' + maxRounds + ' 次浏览器验收'];
+  const lines = [heading, v.validationMode==='http' ? '快速模式：浏览器渲染及交互未检查' : '第 ' + round + '/' + maxRounds + ' 次浏览器验收'];
   if (v.base.blocking?.length) lines.push('页面基础检查未通过，详细证据已保存。');
   for (const i of v.items) {
     const mark = { verified: '✓', warning: '警告', blocker: '阻断', inconclusive: '证据不足', missing_config: '缺少配置', unverifiable: '无法验证' }[i.status];
@@ -357,7 +357,7 @@ export function composeSummary(agentSummary, v) {
   const verified = v?.items?.filter(i => i.status === 'verified') || [];
   const unverified = v?.items?.filter(i => i.status !== 'verified') || [];
   const lines = ['应用已生成并可以预览。', '已实现(代理说明):' + agentSummary,
-    '已验证(浏览器实际执行):' + (verified.length ? verified.map(i => i.id + ' ' + i.expect).join(';') : '仅基础检查'),
+    (v?.validationMode==='http'?'已检查:编译构建、HTTP 服务；未运行浏览器':'已验证(浏览器实际执行):' + (verified.length ? verified.map(i => i.id + ' ' + i.expect).join(';') : '仅基础检查')),
     '未验证:' + (unverified.length ? unverified.map(i => i.id + ' ' + i.action + '(' +
       ({ warning: '有警告', inconclusive: '证据不足', missing_config: '缺少外部服务配置', unverifiable: '无法验证', blocker: '阻断问题' })[i.status] + ')').join(';') : '无')];
   if (unverified.length) lines.push('自动验收发现非阻塞警告，你仍可以打开预览继续测试。');

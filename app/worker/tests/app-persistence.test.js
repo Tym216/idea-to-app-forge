@@ -27,3 +27,18 @@ test('unserializable state cannot replace a valid record; logical collection mus
  assert.throws(()=>state.write(undefined),/retained/);assert.equal(store.get(state.key),original);
  assert.throws(()=>createAppState({}, {storage}),/configuration/);
 });
+
+test('complete game snapshot survives re-entry/auth logout; explicit scoped reset leaves other data intact',async()=>{
+ const {createAppState}=await app('game');
+ const state=createAppState('game-session',{initialValue:{score:0,snake:[[1,1]],direction:'right'},storage});
+ const session={score:70,snake:[[8,2],[7,2],[6,2]],food:[4,4],direction:'up',level:2,paused:true};
+ state.write(session);store.set('auth-session','token');
+ store.delete('auth-session'); // Forge logout removes its own session only.
+ const reentered=createAppState('game-session',{initialValue:{score:0},storage});
+ assert.deepEqual(reentered.read().value,session);
+ const originalOther=createAppState('notes',{initialValue:[],storage});originalOther.write(['keep']);
+ state.reset();assert.equal(state.read().value.score,0);
+ assert.deepEqual(originalOther.read().value,['keep']);
+ store.set(state.key,'{bad');assert.equal(state.read().status,'blocked');
+ assert.equal(store.get(state.key),'{bad');state.reset();assert.equal(state.read().status,'restored');
+});

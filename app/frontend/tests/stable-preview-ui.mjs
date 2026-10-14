@@ -3,7 +3,7 @@ import {chromium} from 'playwright';
 import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
 const root=fileURLToPath(new URL('..',import.meta.url));
-const server=await createServer({configFile:false,envDir:false,root,server:{host:'127.0.0.1',port:0},resolve:{alias:{'@':root+'/src'}},esbuild:{jsx:'automatic'},plugins:[{name:'preview-failure-fixture',configureServer(s){s.middlewares.use((req,res,next)=>{if(req.url==='/tests/unavailable-preview'){res.statusCode=503;res.end('stopped runtime');return;}next();});}}]});
+const server=await createServer({configFile:false,envDir:false,root,server:{host:'127.0.0.1',port:0},resolve:{alias:{'@':root+'/src'}},optimizeDeps:{entries:['tests/stable-preview-ui.html']},esbuild:{jsx:'automatic'},plugins:[{name:'preview-failure-fixture',configureServer(s){s.middlewares.use((req,res,next)=>{if(req.url==='/tests/unavailable-preview'){res.statusCode=503;res.end('stopped runtime');return;}next();});}}]});
 server.middlewares.use((req,res,next)=>{if(req.url==='/tests/unavailable-preview'){res.statusCode=503;res.end('stopped runtime');return;}next();});
 let browser;
 try {
@@ -24,15 +24,18 @@ try {
  assert.equal(await requests(),0);
  await page.reload();await frame.getByText('retained',{exact:true}).waitFor();
  assert.equal(await page.locator('iframe').getAttribute('src'),original);assert.equal(await requests(),0);
+ await page.getByRole('button',{name:'检查并刷新预览'}).click();await frame.getByText('retained',{exact:true}).waitFor();assert.equal(await requests(),0);
  await page.getByRole('button',{name:'Away/back'}).click();assert.equal(await page.locator('iframe').count(),0);
  await page.getByRole('button',{name:'Away/back'}).click();await frame.getByText('retained',{exact:true}).waitFor();
  assert.equal(await page.locator('iframe').getAttribute('src'),original);assert.equal(await requests(),0);
  await page.getByRole('button',{name:'unknown',exact:true}).click();await frame.getByText('retained',{exact:true}).waitFor();assert.equal(await requests(),0);
  await page.getByRole('button',{name:'uncertain',exact:true}).click();await frame.getByText('retained',{exact:true}).waitFor();assert.equal(await requests(),0);assert.equal(await page.getByText('正在启动预览…').count(),0);
- await page.getByRole('button',{name:'pending',exact:true}).click();await page.getByText('正在启动预览…').waitFor();assert.equal(await requests(),0);
+ await page.getByRole('button',{name:'pending',exact:true}).click();await frame.getByText('retained',{exact:true}).waitFor();assert.equal(await requests(),0);
  for(let i=0;i<3;i++)await page.getByRole('button',{name:'Poll',exact:true}).click();assert.equal(await requests(),0);
  await page.getByRole('button',{name:'broken',exact:true}).click();await page.getByText('正在启动预览…').waitFor();assert.equal(await requests(),1);
  for(let i=0;i<3;i++)await page.getByRole('button',{name:'Poll',exact:true}).click();assert.equal(await requests(),1);
+ await page.getByRole('button',{name:'recovering',exact:true}).click();await page.getByText('正在启动预览…').waitFor();assert.equal(await requests(),2);
+ await page.getByRole('button',{name:'Recovery ready',exact:true}).click();await frame.getByText('retained',{exact:true}).waitFor();assert.equal(await requests(),2);await page.getByTestId('health').filter({hasText:'true'}).waitFor();
  assert.equal(external,0);
  console.log('PASS local preview entry: same origin/data across refresh/remount; no warm recovery; one HTTP-failure recovery; pending dedup; inconclusive health preserves URL; uncertain preview remains read-only; zero remote operations');
 } finally {await browser?.close();await server.close();}

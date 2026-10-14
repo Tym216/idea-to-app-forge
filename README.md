@@ -331,3 +331,5 @@ Verify 将页面打不开、占位页或运行时崩溃等有明确证据的故�
 Phase 2 已完成独立 disposable Supabase 的正式迁移、真实权限、PostgreSQL 双连接并发及 fresh Daytona/Chromium fixture 验证，结果与边界见 [cutover rehearsal](docs/workspace-cutover-validation.md)。主要环境尚未 cutover，未验证新协议下的真实模型生成全流程。没有新增 App Version UI 或历史预览。
 
 删除测试 harness 已补齐 `p_attempts`，并实际加载 0001–0006：51/51 通过。删除业务逻辑未修改；disposable 的真实权限、双连接和 Daytona fixture rehearsal 已通过，主要环境尚未 cutover。
+
+Demo 临时快速检查、默认业务状态持久化与 Preview 复用边界见 [连续性说明](docs/demo-fast-mode-continuity.md)。浏览器检查默认开启，当前 Demo 可显式关闭；快速检查不代表功能已验收。

@@ -246,9 +246,9 @@ export function WorkspaceView(props: Props) {
           </div>
           <div className="flex-1 min-h-0 bg-[var(--panel)]">
             {tab === 'plan' && <PlanPanel plans={plans} feedback={feedback} busy={busy} onChanged={onChanged} actions={actions} />}
-            {tab === 'preview' && <PreviewPane checkingWorkspace={props.checkingWorkspace} label={workingDraft ? 'Working Workspace · 正在处理或有未发布修改' : 'Working Workspace · 检查时对应 App v'+versions.find(v=>v.id===project?.checkpoint_id)?.version_number} url={props.previewUrl!==undefined ? props.previewUrl : readyPreview(project,props.recovery) ? props.recovery?.preview_url ?? null : null} state={state}
+            <div className={tab==='preview'?'h-full':'hidden'}><PreviewPane checkingWorkspace={props.checkingWorkspace} label={workingDraft ? 'Working Workspace · 正在处理或有未发布修改' : 'Working Workspace · 检查时对应 App v'+versions.find(v=>v.id===project?.checkpoint_id)?.version_number} url={props.previewUrl!==undefined ? props.previewUrl : readyPreview(project,props.recovery) ? props.recovery?.preview_url ?? null : null} state={state}
               recovery={props.recovery?.sandbox_id === project?.sandbox_id && props.recovery?.project_id === project?.id ? props.recovery : null}
-              recoveryError={props.recoveryError} recoveryPending={props.recoveryPending} onRecover={props.onRecoverPreview} />}
+              recoveryError={props.recoveryError} recoveryPending={props.recoveryPending} onRecover={props.onRecoverPreview} /></div>
             {versionError&&<p role="alert">{versionError}</p>}
             {restoreStatus&&<p role="status" className="p-2 text-sm">{restoreStatus}</p>}
             {tab==='code'&&<div className="p-2 text-xs border-b"> {viewed?'Version '+viewed.version_number+' · 历史源码只读':'Current · Version '+(versions.find(v=>v.id===project?.checkpoint_id)?.version_number??'—')+(workingDraft?' · 有未发布修改':'')}

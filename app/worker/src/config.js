@@ -2,6 +2,7 @@
  * Worker 运行期配置。全部来自环境变量,禁止硬编码密钥。
  * 启动时会自动加载 app/worker/.env(若存在)。
  */
+import { browserVerificationEnabled } from './http-verification.js';
 import { envFileExplicit } from './env.js';
 import { environmentProblems, assertKeyProject } from '../../shared/environment.js';
 import { providerProblems } from './llm-provider.js';
@@ -89,6 +90,9 @@ export const config = {
   aliyunBaseUrl: optional('ALIYUN_BASE_URL'),
   aliyunModel: optional('ALIYUN_MODEL'),
 
+  // Temporary Demo speed preference; production defaults to browser validation.
+  browserVerificationEnabled: optional('BROWSER_VERIFICATION_ENABLED', 'true'),
+
   // Daytona 执行环境
   daytonaApiKey: optional('DAYTONA_API_KEY'),
   daytonaApiUrl: optional('DAYTONA_API_URL', 'https://app.daytona.io/api'),
@@ -119,6 +123,7 @@ export function assertRunnable() {
   for (const [name, value] of [['FUSION_MAX_FILES', config.fusionMaxFiles], ['FUSION_MAX_BYTES', config.fusionMaxBytes]]) {
     if (!Number.isInteger(value) || value < 1 || value > (name === 'FUSION_MAX_FILES' ? 32 : 1048576)) problems.push(name);
   }
+  try { browserVerificationEnabled(config.browserVerificationEnabled); } catch (e) { problems.push(e.message); }
   if (!config.supabaseUrl) problems.push('SUPABASE_URL');
   if (!config.supabaseServiceRoleKey) problems.push('SUPABASE_SERVICE_ROLE_KEY');
   else try { assertKeyProject(config.supabaseServiceRoleKey,config.expectedSupabaseProjectRef); } catch(e) { problems.push(e.message); }

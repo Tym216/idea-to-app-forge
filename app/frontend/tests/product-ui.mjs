@@ -4,7 +4,7 @@ const server=await createServer({configFile:false,envDir:false,root,server:{host
  'import.meta.env.VITE_FORGE_ENVIRONMENT_ID':JSON.stringify('atoms-demo'),
  'import.meta.env.VITE_EXPECTED_SUPABASE_PROJECT_REF':JSON.stringify('abcdefghijklmnopqrst'),
  'import.meta.env.VITE_SUPABASE_URL':JSON.stringify('https://abcdefghijklmnopqrst.supabase.co'),
- 'import.meta.env.VITE_SUPABASE_ANON_KEY':JSON.stringify('offline-public-key')},esbuild:{jsx:'automatic'}});
+ 'import.meta.env.VITE_SUPABASE_ANON_KEY':JSON.stringify('offline-public-key')},optimizeDeps:{entries:['tests/product-ui.html']},esbuild:{jsx:'automatic'}});
 let browser;try{
  await server.listen();const port=server.httpServer.address().port;browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.FORGE_TEST_CHROMIUM?{executablePath:process.env.FORGE_TEST_CHROMIUM}:{})});
  const page=await browser.newPage();let mutations=0;

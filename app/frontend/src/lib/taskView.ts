@@ -58,7 +58,7 @@ const PHASE_TEXT: Record<string, string> = {
   action_plan: '已生成行动计划',
   sandbox: '准备运行环境',
   react: '正在准备生成应用',
-  verify: '正在验收应用交互',
+  verify: '正在检查应用',
   list_files: '读取现有代码',
   read_file: '读取现有代码',
   write_file: '修改代码',
