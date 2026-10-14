@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Index from './pages/Index';
 import Workspace from './pages/Workspace';
+import AppPreview from './pages/AppPreview';
 import AuthCallback from './pages/AuthCallback';
 import AuthError from './pages/AuthError';
 import UiMock from './pages/UiMock';
@@ -16,6 +17,7 @@ const AppRoutes = () => (
   <Routes>
     <Route path="/" element={<Index />} />
     <Route path="/workspace/:projectId" element={<Workspace />} />
+    <Route path="/preview/:projectId" element={<AppPreview />} />
     <Route path="/auth/callback" element={<AuthCallback />} />
     <Route path="/auth/error" element={<AuthError />} />
     <Route path="/ui-mock" element={<UiMock />} />

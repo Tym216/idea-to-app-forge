@@ -298,14 +298,14 @@ export async function completedCheckpoint(task) {
 /** Read-only preflight; never claim a task to test migration/function availability. */
 export async function checkWorkspaceSchema(client = admin) {
   const reads = [
-    ['ita_projects', 'workspace_revision,workspace_state,workspace_hash,workspace_epoch,workspace_writer,workspace_build,workspace_verify,checkpoint_id'],
+    ['ita_projects', 'workspace_revision,workspace_state,workspace_hash,workspace_epoch,workspace_writer,workspace_build,workspace_verify,checkpoint_id,active_app_version_id'],
     ['ita_changesets', 'id,base_revision,target_hash,status,submission_fingerprint,submission_basis'],
-    ['ita_snapshots', 'kind,workspace_revision,code_hash,completion_key,version_number,parent_checkpoint_id'],
+    ['ita_snapshots', 'kind,workspace_revision,code_hash,completion_key,version_number,parent_checkpoint_id,app_version_id'],
     ['ita_tasks', 'base_workspace_revision,context_workspace_revision,operation,requested_changeset_id'],
     ['ita_preview_recoveries','ready_revision,ready_hash'],
   ];
   const results = await Promise.all(reads.map(([table, columns]) => client.from(table).select(columns, { head: true }).limit(1)));
-  for (let i = 0; i < results.length; i++) if (results[i].error) throw stateError(`工作区/Demo 迁移 0006–0009 (${reads[i][0]})`, results[i].error);
+  for (let i = 0; i < results.length; i++) if (results[i].error) throw stateError(`工作区/Demo 迁移 0006–0013 (${reads[i][0]})`, results[i].error);
   const { error } = await client.rpc('ita_workspace_read', {
     p_project_id: '00000000-0000-0000-0000-000000000000', p_task_id: '00000000-0000-0000-0000-000000000000',
     p_worker_id: config.workerId, p_execution_id: '00000000-0000-0000-0000-000000000000',

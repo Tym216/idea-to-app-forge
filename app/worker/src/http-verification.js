@@ -1,4 +1,5 @@
 import {fingerprint,verifyFingerprint,sha256} from './managed-source.js';
+import {PREVIEW_RUNTIME_FINGERPRINT} from './preview-platform.js';
 const shellQuote = (value) => '\'' + String(value).replaceAll("'", "'\\''") + '\'';
 export function browserVerificationEnabled(value = true) {
  if(value === true || value === 'true')return true;
@@ -30,10 +31,10 @@ try {
 finally{clearTimeout(timer);}
 console.log('FORGE_HTTP_CHECK:'+JSON.stringify(result));
 `;
-export function httpVerificationFingerprint(acceptance,buildBasis) {
+export function httpVerificationFingerprint(acceptance,buildBasis,{legacy=false}={}) {
  return fingerprint({schema:1,mode:'http_only',approvedBasis:verifyFingerprint(acceptance,{
   runnerHash:sha256(HTTP_CHECK_SOURCE),playwrightVersion:'not_used',buildBasis}),
-  buildBasis,recipe:sha256(HTTP_CHECK_SOURCE),browserChecksRun:false});
+  buildBasis,recipe:sha256(HTTP_CHECK_SOURCE),browserChecksRun:false,...(legacy?{}:{previewRuntime:PREVIEW_RUNTIME_FINGERPRINT})});
 }
 export async function runHttpVerification({sandbox,sandboxId,acceptance}) {
  const command='node -e '+shellQuote(HTTP_CHECK_SOURCE);

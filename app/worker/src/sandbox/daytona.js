@@ -2,6 +2,7 @@ import { Daytona } from '@daytona/sdk';
 import { config } from '../config.js';
 import { assertWorkerEnvironment } from '../environment.js';
 import { logger } from '../logger.js';
+import {renderPreviewConfig,platformDevCommand,PLATFORM_RUNTIME_PROBE,PREVIEW_RUNTIME_VERSION,PREVIEW_RUNTIME_FINGERPRINT} from '../preview-platform.js';
 
 /**
  * Daytona 执行环境适配器,基于官方 SDK `@daytona/sdk`(原 @daytonaio/sdk 已更名)。
@@ -189,6 +190,10 @@ export class DaytonaProvider {
    */
   async startBackground(sandboxId, command, { sessionId = DEV_SESSION } = {}) {
     const { sandbox, workdir } = await this.resolve(sandboxId);
+    if (/^npm run --ignore-scripts dev(?: -- .*)?$/.test(command)) {
+      await this.writeFile(sandboxId,'.forge-preview/vite.config.mjs',renderPreviewConfig(this.settings,this.expectedOwner(sandboxId)));
+      command=platformDevCommand(command);
+    }
     try {
       await sandbox.process.deleteSession(sessionId);
     } catch {
@@ -200,6 +205,29 @@ export class DaytonaProvider {
       runAsync: true,
     });
     return { sessionId, commandId: response.cmdId };
+  }
+
+  /** Called only inside the workspace start/preview operation, never on a React remount.
+   * A one-time legacy server upgrade stops the whole sandbox and confirms Stopped;
+   * no claim that deleting a session proves detached processes have exited.
+   */
+  async ensurePreviewPlatform(sandboxId) {
+    const sb=await this.getOwned(sandboxId);
+    if(String(sb.state).toLowerCase()!=='started')throw new Error('WORKSPACE_UNCERTAIN: preview runtime not started');
+    if(!await this.isPortListening(sandboxId,5173))return;
+    const probe=await this.exec(sandboxId,PLATFORM_RUNTIME_PROBE,{timeoutMs:10000});
+    if(probe.timedOut)throw new Error('WORKSPACE_UNCERTAIN: platform probe did not finish');
+    try {const info=JSON.parse(probe.stdout);if(probe.exitCode===0&&info.version===PREVIEW_RUNTIME_VERSION&&info.fingerprint===PREVIEW_RUNTIME_FINGERPRINT)return;}catch{/* legacy runtime */}
+    await this.client.stop(sb);
+    let stopped=false;
+    for(let i=0;i<20;i++){
+      const current=await this.getOwned(sandboxId),state=String(current.state).toLowerCase();
+      if(state==='stopped'){stopped=true;break;}
+      if(state!=='stopping')throw new Error('WORKSPACE_UNCERTAIN: unexpected platform upgrade lifecycle '+state);
+      await new Promise(resolve=>setTimeout(resolve,1000));
+    }
+    if(!stopped)throw new Error('WORKSPACE_UNCERTAIN: old preview processes not confirmed stopped');
+    await this.client.start(await this.getOwned(sandboxId),180);this.cache.delete(sandboxId);
   }
 
   async readLogs(sandboxId, { sessionId = DEV_SESSION, commandId } = {}) {

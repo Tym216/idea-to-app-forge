@@ -2,10 +2,10 @@ import {usePreviewEntry,probePreviewHealth} from '@/lib/previewEntry';
 import { previewRecoveryKey, savedPreviewIdentity } from '@/lib/workspaceState';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import type { AppVersion, Message, Plan, PlanFeedback, PreviewRecovery, Project, ProjectFile, Task } from '@/lib/supabase';
+import type { AppVersion, CheckpointIdentity, Message, Plan, PlanFeedback, PreviewRecovery, Project, ProjectFile, Task } from '@/lib/supabase';
 import {
   exportProjectZip,
-  listAppVersions,
+  listAppVersions, getCheckpointIdentity,
   submitUserApply, restoreAppVersion,
   getProject,
   getPreviewRecovery,
@@ -18,6 +18,7 @@ import {
   submitTask,
 } from '@/lib/data';
 import { WorkspaceView, type Mode } from '@/components/WorkspaceView';
+import {useSession} from '@/hooks/useSession';
 import { MemoryPanel } from '@/components/MemoryPanel';
 
 /** 工作区:数据读取与提交;任务由服务端 Worker 推进,前端轮询读取,刷新后状态完整保留。 */
@@ -27,6 +28,7 @@ export default function Workspace() {
 }
 function ProjectWorkspace({projectId}:{projectId:string}) {
   const navigate = useNavigate();
+  const {session}=useSession();
   const [searchParams, setSearchParams] = useSearchParams();
   const [project, setProject] = useState<Project | null>(null);
   // Preview is read-only and may load before the revision-bracketed editor data.
@@ -36,6 +38,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [versions,setVersions] = useState<AppVersion[]>([]);
+  const [checkpoint,setCheckpoint]=useState<CheckpointIdentity|null>(null);
   const [feedback, setFeedback] = useState<PlanFeedback[]>([]);
   const [error, setError] = useState('');
   const autoSubmitted = useRef(false);
@@ -68,13 +71,14 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
     try {
       const before = await getProject(projectId);
       setPreviewProject(previous=>previous??before);
-      const [m, f, t, pl, fb, vs, job] = await Promise.all([
+      const [m, f, t, pl, fb, vs, job, cp] = await Promise.all([
         listMessages(projectId), listFiles(projectId), listTasks(projectId),
         listPlans(projectId), listPlanFeedback(projectId), listAppVersions(projectId), getPreviewRecovery(projectId),
+        before.checkpoint_id?getCheckpointIdentity(before.checkpoint_id,projectId):Promise.resolve(null),
       ]);
       const p = await getProject(projectId);
       // Monotonic revision brackets the files SELECT; never pair old files with a new edit basis.
-      if (before.workspace_revision !== p.workspace_revision || before.workspace_hash !== p.workspace_hash) {
+      if (before.workspace_revision !== p.workspace_revision || before.workspace_hash !== p.workspace_hash || before.checkpoint_id !== p.checkpoint_id) {
         setError('工作区正在更新，正在同步源码。请稍后重新加载。');
         return;
       }
@@ -86,7 +90,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
       setTasks(t);
       setPlans(pl);
       setFeedback(fb);
-      setVersions(vs);
+      setVersions(vs);setCheckpoint(cp);
       setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -162,7 +166,11 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
     <WorkspaceView
       key={projectId}
       project={project}
+      storageIdentity={session?.user.id&&previewSource?.user_id===session.user.id?{
+       environment:import.meta.env.VITE_FORGE_ENVIRONMENT_ID,ref:import.meta.env.VITE_EXPECTED_SUPABASE_PROJECT_REF,
+       userId:session.user.id,projectId}:undefined}
       versions={versions}
+      checkpoint={checkpoint}
       checkingWorkspace={checkingWorkspace}
       viewingVersionId={searchParams.get('version')}
       onViewingVersion={id=>{const next=new URLSearchParams(searchParams);if(id)next.set('version',id);else next.delete('version');setSearchParams(next,{replace:true});}}
@@ -183,6 +191,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
       recoveryError={recoveryError}
       recoveryPending={recoveryPending}
       onRecoverPreview={() => void checkAndRefreshPreview()}
+      onUpgradePreview={()=>void recoverPreview()}
       memory={<MemoryPanel projectId={projectId} />}
     />
   );

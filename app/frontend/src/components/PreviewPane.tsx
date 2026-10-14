@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock, ExternalLink, Loader2, Monitor, RotateCw } from 'lucide-react';
+import {resetPreviewStorage} from '../../../shared/preview-storage.js';
+import {usePreviewStorage,type PreviewStorageIdentity} from '@/lib/previewStorage';
 import type { ViewState } from '@/lib/taskView';
 import type { PreviewRecovery } from '@/lib/supabase';
 
@@ -14,11 +16,19 @@ const EMPTY_TEXT: Record<ViewState, { icon: typeof Monitor; title: string; body:
 };
 
 /** 真实预览:iframe 指向 Daytona 沙箱预览地址;无地址时按任务状态给出说明。 */
-export function PreviewPane({ label, url, checkingWorkspace, state = 'empty', recovery, recoveryError, recoveryPending, onRecover }: {
-  label?:string; checkingWorkspace?:boolean; url: string | null; state?: ViewState; recovery?: PreviewRecovery | null; recoveryError?: string;
-  recoveryPending?: boolean; onRecover?: () => void;
+export function PreviewPane({ label, url, storageIdentity, checkingWorkspace, state = 'empty', recovery, recoveryError, recoveryPending, onRecover, onUpgradePlatform }: {
+  storageIdentity?:PreviewStorageIdentity; label?:string; checkingWorkspace?:boolean; url: string | null; state?: ViewState; recovery?: PreviewRecovery | null; recoveryError?: string;
+  recoveryPending?: boolean; onRecover?: () => void; onUpgradePlatform?:()=>void;
 }) {
   const [nonce, setNonce] = useState(0);
+  const frame=useRef<HTMLIFrameElement>(null);
+  const storageStatus=usePreviewStorage(frame,url,storageIdentity,nonce);
+  const [resetError,setResetError]=useState('');
+  const resetData=async()=>{
+   if(!storageIdentity||!window.confirm('重置当前项目的业务数据？所有 App 版本共享这些数据，源码和版本记录不会删除。'))return;
+   try{await resetPreviewStorage(storageIdentity);setResetError('');setNonce(n=>n+1);}
+   catch(e){setResetError(e instanceof Error?e.message:String(e));}
+  };
   const recovering = recoveryPending || recovery?.status === 'queued' || recovery?.status === 'running';
   const transient=/network|fetch|timeout|503|502/i.test(recoveryError || '');
   // Background metadata/recovery must not tear down an already usable iframe.
@@ -54,14 +64,20 @@ export function PreviewPane({ label, url, checkingWorkspace, state = 'empty', re
       <div className="h-9 px-3 flex items-center gap-2 border-b border-[var(--line)]">
         <span className="text-[11px] text-[var(--accent)] shrink-0">{label ?? 'Working Workspace'}</span>
         <span className="flex-1 truncate font-mono text-[12px] text-[var(--text-2)]">{url}</span>
+        {storageStatus==='unavailable'&&(onUpgradePlatform||onRecover)&&<button type="button" disabled={!!recovering} className="forge-btn forge-btn-secondary text-xs" onClick={()=>{
+         if(window.confirm('为旧应用启用平台状态保存？首次会重启已有预览运行环境；已保存数据保留，尚未保存的内存状态无法自动迁移。'))(onUpgradePlatform||onRecover)?.();
+        }}>启用状态保留</button>}
+        {storageIdentity&&<button type="button"  className="forge-btn forge-btn-neutral text-xs" onClick={()=>void resetData()}>重置业务数据</button>}
         <button type="button" aria-label="检查并刷新预览" onClick={() => { setNonce((n) => n + 1); onRecover?.(); }} className="btn-ghost grid h-7 w-7 place-items-center rounded-[6px]">
           <RotateCw className="h-3.5 w-3.5" />
         </button>
-        <a href={url} target="_blank" rel="noreferrer" aria-label="在新窗口打开预览" className="btn-ghost grid h-7 w-7 place-items-center rounded-[6px]">
+        <span className="text-xs shrink-0" role="status">{storageStatus==='error'?'状态保存异常':storageStatus==='saved'?'状态已保存':storageStatus==='ready'?'状态已恢复':''}</span>
+        <a href={storageIdentity?'/preview/'+storageIdentity.projectId:url} target="_blank" rel="noreferrer" aria-label="在新窗口打开预览" className="btn-ghost grid h-7 w-7 place-items-center rounded-[6px]">
           <ExternalLink className="h-3.5 w-3.5" />
         </a>
       </div>
-      <iframe key={`${nonce}:${url}`} src={url} title="应用预览" className="flex-1 w-full bg-white" />
+      {resetError&&<p role="alert">{resetError}</p>}
+      <iframe ref={frame} key={`${nonce}:${url}`} src={url} title="应用预览" className="flex-1 w-full bg-white" />
     </div>
   );
 }

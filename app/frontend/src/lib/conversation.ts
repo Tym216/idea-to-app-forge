@@ -29,7 +29,7 @@ export function conversationTurns(messages:Message[],tasks:Task[],versions:AppVe
   let turn=m.task_id?byTask.get(m.task_id):undefined;
   if(!turn){turn={id:'message:'+m.id,tasks:[],messages:[],versions:[],intent:''};turns.push(turn);}
   turn.messages.push(m);
-  const id=m.meta?.checkpointId,v=typeof id==='string'?versions.find(v=>v.id===id):undefined;
+  const id=m.meta?.appVersionId??m.meta?.checkpointId,v=typeof id==='string'?versions.find(v=>v.id===id):undefined;
   if(v&&!turn.versions.some(x=>x.id===v.id))turn.versions.push(v);
  }
  for(const turn of turns)turn.tasks.sort((a,b)=>tasks.indexOf(a)-tasks.indexOf(b));

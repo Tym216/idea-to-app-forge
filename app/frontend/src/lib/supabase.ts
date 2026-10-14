@@ -35,6 +35,7 @@ export type PreviewRecovery = {
 
 export type Project = {
   checkpoint_id?: string | null;
+  active_app_version_id?: string | null;
   workspace_revision?: number;
   workspace_hash?: string | null;
   workspace_state?: string;
@@ -63,7 +64,7 @@ export type Message = {
   created_at: string;
 };
 
-export type TaskStep = { tool: string; phase: string; observation: string; at: string; ok?: boolean; ms?: number; event?: 'started' | 'finished'; path?: string; result?: unknown };
+export type TaskStep = { tool: string; phase: string; observation: string; at: string; ok?: boolean; ms?: number; event?: 'started' | 'finished' | 'retrying'; path?: string; result?: unknown };
 export type Stage = { key: string; label: string; status: 'pending' | 'running' | 'done' | 'failed'; note: string };
 
 export type PlanQuestion = { id: string; question: string; options: string[]; recommended?: string };
@@ -150,7 +151,9 @@ export type FeedbackCategory = 'missing_feature' | 'preview_broken' | 'stuck' | 
 export type TaskFeedback = { id: string; task_id: string; execution_id: string | null; category: FeedbackCategory; note: string; created_at: string };
 
 export type AppVersion = {
- id:string; project_id:string; version_number:number; parent_checkpoint_id:string|null;
+ id:string; project_id:string; version_number:number; parent_checkpoint_id:string|null; app_version_id?:string|null;
  label:string; created_at:string; workspace_revision:number; code_hash:string; basis_id:string;
  verify_evidence: {status:string;result?:{validationMode?:string;featureChecksRun?:boolean}}; files?: {path:string;content:string}[];
 };
+
+export type CheckpointIdentity=Pick<AppVersion,'id'|'project_id'|'workspace_revision'|'code_hash'|'app_version_id'>;

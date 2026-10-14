@@ -42,3 +42,8 @@ test('install takeover requires a durable returned-command attestation; a timed-
  ws.state={writer:{kind:'install',changeset_id:'c'},pending:[{id:'c',origin:'install_drift'}]};
  await assert.rejects(ws.reconcile(),{code:'WORKSPACE_UNCERTAIN'});
 });
+
+test('schema preflight refuses missing active App identity before task claims',async()=>{
+ const client={from:table=>({select:columns=>({limit:async()=>({error:table==='ita_projects'&&columns.includes('active_app_version_id')?{message:'missing active_app_version_id'}:null})})}),rpc:async()=>{throw Error('must not call RPC after failed catalog read');}};
+ await assert.rejects(checkWorkspaceSchema(client),{code:'SUPABASE_STATE'});
+});

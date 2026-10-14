@@ -13,10 +13,13 @@ export function VersionsPanel({versions,currentId,workingDraft,onSelect,onRestor
  return <div className="h-full flex flex-col min-h-0">
   <div className="p-3 text-sm">{workingDraft && <p>工作区正在处理或含未发布修改。预览展示 Working Workspace，不代表 Current App Version。</p>}
    {versions.length===0 && <p>还没有编号的 App Version。历史 legacy checkpoint 不会被伪造为 v0。</p>}
-   {versions.map(v=><div key={v.id} className="flex gap-2 items-center flex-wrap">
-    <button className="btn-ghost px-3 py-2" onClick={()=>onSelect?onSelect(v.id):void pick(v.id)}>App v{v.version_number}{v.id===currentId?' · Current':''} · {versionTitle(v)}</button>
-    {onRestore&&<button className="btn-ghost px-3 py-2 text-xs" aria-label={'恢复 App v'+v.version_number+' 到当前工作区'} disabled={restoreBlocked||(v.id===currentId&&!workingDraft)} onClick={()=>onRestore(v)}>恢复到当前工作区</button>}
-   </div>)}
+   <div className="space-y-2">{[...versions].sort((a,b)=>b.version_number-a.version_number).map(v=><div key={v.id} className={'forge-version-card '+(v.id===currentId?'forge-version-current':'')}>
+    <button aria-label={'App v'+v.version_number+(v.id===currentId?' · Current':'')+' · '+versionTitle(v)} className="flex-1 min-w-0 text-left px-3 py-3 rounded-lg hover:bg-violet-50" onClick={()=>onSelect?onSelect(v.id):void pick(v.id)}>
+     <span className="flex items-center gap-2 font-semibold"><span>App v{v.version_number}</span>{v.id===currentId&&<span className="forge-current-badge">Current</span>}</span>
+     <span className="block text-xs mt-1 text-[var(--text-2)] truncate">{versionTitle(v)}</span>
+    </button>
+    {onRestore&&<button className="forge-btn forge-btn-secondary mr-3 text-xs" aria-label={'恢复 App v'+v.version_number+' 到当前工作区'} disabled={restoreBlocked||(v.id===currentId&&!workingDraft)} onClick={()=>onRestore(v)}>恢复到当前工作区</button>}
+   </div>)}</div>
    {loading && <p role="status">读取版本源码…</p>}{error && <p role="alert">{error}</p>}
    {selected && <p>App v{selected.version_number} · revision {selected.workspace_revision} · 验收：{selected.verify_evidence?.status ?? '未验证'} · 历史源码只读。Code Version 不回滚业务数据。</p>}
   </div>

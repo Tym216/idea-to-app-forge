@@ -14,6 +14,7 @@ const optional = (name, fallback = '') => process.env[name] || fallback;
 
 export const config = {
   environmentId: required('FORGE_ENVIRONMENT_ID'),
+  forgePublicOrigin: optional('FORGE_PUBLIC_ORIGIN'),
   expectedSupabaseProjectRef: required('EXPECTED_SUPABASE_PROJECT_REF'),
   envFileExplicit,
   workerId: optional('WORKER_ID', `worker-${Math.random().toString(36).slice(2, 10)}`),

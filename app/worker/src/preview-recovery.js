@@ -22,6 +22,7 @@ export async function recoverExistingPreview(provider, id, phase, sleep = (ms) =
   provider.cache.delete(id);
   await phase('server');
   await provider.configureIdle(sandbox);
+  await provider.ensurePreviewPlatform?.(id);
   const ready = async () => {
     const r = await provider.exec(id, 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5173/ || true', { timeoutMs: 10000 });
     return /^2\d\d$/.test(r.stdout.trim());

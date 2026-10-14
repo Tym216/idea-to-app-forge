@@ -1,4 +1,5 @@
 import {conversationTurns,turnResponse,versionTitle} from '../src/lib/conversation';
+import '../src/index.css';
 import React,{useState} from 'react';import {createRoot} from 'react-dom/client';
 import {WorkspaceView} from '../src/components/WorkspaceView';
 import type {AppVersion,Message,Project,Task} from '../src/lib/supabase';
@@ -21,10 +22,13 @@ const projectionProof={turns:persisted.length,oneTaskAssistant:persisted.filter(
  stableTurnId:running[0].id===checking[0].id,progressChanged:turnResponse(running[0])!==turnResponse(checking[0]),
  noRaw:!turnResponse(persisted[0]).includes('WORKSPACE'),intentTitle:versionTitle(versions[0],persisted[0].intent),initialOneTurn:initial.length===1&&initial[0].tasks.length===2};
 function Demo(){
+ const [restored,setRestored]=useState(false);
  const [selected,setSelected]=useState(new URLSearchParams(location.search).get('version'));
  const [submissions,setSubmissions]=useState(0);
  const [restorations,setRestorations]=useState<unknown[]>([]);
- return <><output hidden data-testid="restorations">{JSON.stringify(restorations)}</output><output hidden data-testid="projection-proof">{JSON.stringify(projectionProof)}</output><output data-testid="submissions">{submissions}</output><WorkspaceView project={project} files={[{id:'f',project_id:'p',path:'src/App.tsx',content:'Blue string',updated_at:'now'}]}
+ const liveProject=restored?{...project,checkpoint_id:'technical-restore',active_app_version_id:'v1',workspace_revision:3,workspace_hash:'old'}:project;
+ const technical=restored?{...versions[1],id:'technical-restore',app_version_id:'v1',workspace_revision:3}:undefined;
+ return <><button onClick={()=>{setRestored(true);setSelected(null);history.replaceState(null,'',location.pathname);}}>Simulate restored V1</button><output hidden data-testid="restorations">{JSON.stringify(restorations)}</output><output hidden data-testid="projection-proof">{JSON.stringify(projectionProof)}</output><output data-testid="submissions">{submissions}</output><WorkspaceView project={liveProject} checkpoint={technical} files={[{id:'f',project_id:'p',path:'src/App.tsx',content:restored?'Original string':'Blue string',updated_at:'now'}]}
  messages={messages} tasks={tasks} versions={versions} plans={[]} feedback={[]} error="" memory={null} onBack={()=>{}} onExport={()=>{}} onSubmit={async()=>true} onChanged={()=>{}}
  viewingVersionId={selected} onViewingVersion={id=>{setSelected(id);history.replaceState(null,'',id?'?version='+id:location.pathname);}}
  onRestore={async(id,requestId,baseRevision)=>{setRestorations(r=>[...r,{id,requestId,baseRevision}]);return {accepted:true,task_id:'restore-task',changeset_id:'restore-change'};}}

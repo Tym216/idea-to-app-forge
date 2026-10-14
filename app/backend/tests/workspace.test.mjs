@@ -558,6 +558,45 @@ await assertForgeTablePrivileges(db);
 for(const role of ['anon','service_role'])assert.equal((await svc("select has_function_privilege($1,'public.ita_restore_app_version(uuid,uuid,text,bigint)','EXECUTE') ok",[role]))[0].ok,false);
 console.log('PASS historical restore SQL: owned immutable snapshot diff, agent-file delete only through restore, task/writer/unresolved/stale fences, immutable submission, idempotency and request conflict, zero-op, fresh revision/new child version, unchanged historical snapshots and source authority');
 
+
+await db.exec(readFileSync(new URL('../migrations/0013_active_app_version.sql',import.meta.url),'utf8'));
+const legacyNumberedBefore=(await svc('select to_jsonb(s) row from public.ita_snapshots s where id=$1',[productV2.snapshot_id]))[0].row;
+const restoredV1=await restoreProduct('select-original-v1',6,productV1.snapshot_id);
+await applyProduct(restoredV1,initialFiles);
+const technicalRestore=await publishProduct('restore-without-number',7,initialFiles);
+assert.equal(technicalRestore.version_number,1);
+assert.equal(technicalRestore.app_version_id,productV1.snapshot_id);
+const restoreEvent=(await svc("select meta from public.ita_messages where task_id=$1 and role='assistant' order by created_at desc limit 1",[restoredV1.task_id]))[0].meta;
+assert.equal(restoreEvent.appVersionId,productV1.snapshot_id);assert.equal(restoreEvent.versionNumber,1);
+assert.equal((await svc('select version_number,app_version_id from public.ita_snapshots where id=$1',[technicalRestore.snapshot_id]))[0].version_number,null);
+assert.equal((await svc('select active_app_version_id,checkpoint_id from public.ita_projects where id=$1',[productId]))[0].active_app_version_id,productV1.snapshot_id);
+assert.equal((await svc('select max(version_number)::int n from public.ita_snapshots where project_id=$1',[productId]))[0].n,6);
+assert.equal((await productCall('ita_complete_build_checkpoint',['restore-without-number',7,hash(initialFiles),b,v,productPlan,'Completed edits','https://stable.test/'],['text','bigint','text','text','text','uuid','text','text'])).snapshot_id,technicalRestore.snapshot_id);
+await assert.rejects(productCall('ita_complete_build_checkpoint',['restore-without-number',7,hash(initialFiles),b,v,productPlan,'Different summary','https://stable.test/'],['text','bigint','text','text','text','uuid','text','text']),/IDEMPOTENCY_CONFLICT/);
+assert.deepEqual((await svc('select to_jsonb(s) row from public.ita_snapshots s where id=$1',[productV2.snapshot_id]))[0].row,legacyNumberedBefore);
+for(const role of ['anon','authenticated','service_role']){
+ assert.equal((await svc("select has_column_privilege($1,'public.ita_projects','active_app_version_id','UPDATE') ok",[role]))[0].ok,false);
+ assert.equal((await svc("select has_column_privilege($1,'public.ita_snapshots','app_version_id','UPDATE') ok",[role]))[0].ok,false);
+}
+assert.deepEqual(await restoreProduct('same-v1',7,productV1.snapshot_id),{accepted:true,noop:true});
+const nextRealEdit=await submitProduct('edit-after-restoring',7,[{path:'src/a.ts',content:'NEXT'}]);
+const nextFiles=[{path:'src/a.ts',content:'NEXT'}];await applyProduct(nextRealEdit,nextFiles);
+const nextRealVersion=await publishProduct('new-real-version',8,nextFiles);
+assert.equal(nextRealVersion.version_number,7);
+assert.equal((await svc('select parent_checkpoint_id from public.ita_snapshots where id=$1',[nextRealVersion.snapshot_id]))[0].parent_checkpoint_id,productV1.snapshot_id);
+await assert.rejects(svc('update public.ita_snapshots set app_version_id=$1 where id=$2',[productV1.snapshot_id,nextRealVersion.snapshot_id]),/IMMUTABLE|permission denied/);
+// A controlled install/source drift must never be presented as the original historical version.
+const driftRestore=await restoreProduct('restore-drift',8,productV1.snapshot_id);
+await applyProduct(driftRestore,initialFiles);
+const driftFiles=[{path:'src/a.ts',content:'not-original'}];
+const driftChange=await productCall('ita_workspace_prepare',['source-after-restore','agent',9,JSON.stringify([{operation:'write',path:'src/a.ts',content:'not-original'}]),hash(driftFiles)],['text','text','bigint','jsonb','text']);
+const driftWriter=await productCall('ita_workspace_acquire',[randomUUID(),'mutation','product-sb',driftChange.id],['uuid','text','text','uuid']);
+await productCall('ita_workspace_commit',[driftWriter.token,driftChange.id,JSON.stringify(driftFiles),hash(driftFiles)],['uuid','uuid','jsonb','text']);
+await assert.rejects(publishProduct('drift-not-v1',10,driftFiles),/RESTORE_SOURCE_CHANGED/);
+await db.query('delete from public.ita_projects where id=$1',[productId]);
+assert.equal((await svc('select count(*)::int n from public.ita_snapshots where project_id=$1',[productId]))[0].n,0);
+console.log('PASS restore identity: original App number/current pointer, new technical checkpoint, exact source, immutable history, idempotency, next real edit numbering/parent, drift rejection, authority and cascade');
+
 await db.close();
 console.log('PASS Demo SQL: numbered versions/legacy parent/immutable metadata/completion-key repeat/approval separation; User Apply ownership/active task+writer+preview/unresolved/idempotency/stale/input authority; preview revision receipt/cache invalidation (single-connection PGlite, not a dual-connection concurrency proof)');
 console.log('PASS workspace SQL: canonical hash, source privilege cutover, RLS, lease/epoch, partial recovery, no-op, stale conflict, evidence reuse, blocker/tool-error, immutable idempotent checkpoint, legacy multi-intent committed/not_applied exit, authority ACLs, third-hash rejection, completion identity, DELETE immutability, cascade (single-connection PGlite; not concurrency proof)');

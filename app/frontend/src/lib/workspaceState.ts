@@ -1,7 +1,8 @@
-import type { AppVersion, PreviewRecovery, Project, Task } from './supabase';
+import type { AppVersion, CheckpointIdentity, PreviewRecovery, Project, Task } from './supabase';
+export const currentAppVersionId = (project:Project|null, checkpoint?:CheckpointIdentity|null) => project?.active_app_version_id ?? checkpoint?.app_version_id ?? project?.checkpoint_id;
 export const defaultMode = (project: Project | null) => project?.checkpoint_id ? 'build' as const : 'plan' as const;
 export const activeTask = (tasks:Task[]) => tasks.some(t=>['queued','running','paused'].includes(t.status));
-export const stableWorkspace = (project:Project|null, version:AppVersion|undefined) => !!project && !!version
+export const stableWorkspace = (project:Project|null, version:CheckpointIdentity|undefined) => !!project && !!version
  && project.workspace_state==='confirmed' && !project.workspace_writer && project.checkpoint_id===version.id
  && project.workspace_revision===version.workspace_revision && project.workspace_hash===version.code_hash;
 export const readyPreview = (project:Project|null, recovery:PreviewRecovery|null|undefined) => !!project && !!recovery

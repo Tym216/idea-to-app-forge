@@ -53,23 +53,23 @@ export function CodeExplorer({files,readonly=true,revision=0,blocked=false,task,
   const signature=JSON.stringify(input);if(request.current?.signature!==signature)request.current={signature,id:crypto.randomUUID()};
   setSubmitting(true);setError('');
   try{const receipt=await onApply({...input,requestId:request.current.id});
-   if(receipt.noop){setDrafts({});setBase(null);setIntent('');setAccepted('');setNoop(true);setSaved(false);submitted.current=null;request.current=undefined;localStorage.removeItem(key);}
+   if(!('task_id' in receipt)){setDrafts({});setBase(null);setIntent('');setAccepted('');setNoop(true);setSaved(false);submitted.current=null;request.current=undefined;localStorage.removeItem(key);}
    else{submitted.current=Object.fromEntries(changed);setAccepted(receipt.task_id);setNoop(false);}
   }catch(e){setError(e instanceof Error?e.message:String(e));}finally{setSubmitting(false);}
  };
  return <div className="h-full flex flex-col min-h-0">
  {!readonly&&<div className="p-2 border-b border-[var(--line)] text-xs space-y-2">
   <div className="flex gap-2 flex-wrap">
-   <button className="btn-primary px-3 py-1 rounded" disabled={blocked||submitting||stale||!changed.length} onClick={()=>void apply()}>Apply Changes</button>
-   <button className="btn-ghost px-3 py-1" disabled={submitting} onClick={save}>保存草稿</button>
-   <button className="btn-ghost px-3 py-1" disabled={submitting} onClick={()=>{setDrafts({});setBase(null);setIntent('');setError('');setNoop(false);setSaved(false);request.current=undefined;localStorage.removeItem(key);}}>Reload / discard draft</button>
+   <button className="forge-btn forge-btn-primary" disabled={blocked||submitting||stale||!changed.length} onClick={()=>void apply()}>Apply Changes</button>
+   <button className="forge-btn forge-btn-secondary" disabled={submitting} onClick={save}>保存草稿</button>
+   <button className="forge-btn forge-btn-neutral" disabled={submitting} onClick={()=>{setDrafts({});setBase(null);setIntent('');setError('');setNoop(false);setSaved(false);request.current=undefined;localStorage.removeItem(key);}}>Reload / discard draft</button>
    <span>{changed.length} 个本地修改 · revision {base??revision}</span>
   </div>
   <input aria-label="修改说明" placeholder="这次修改做了什么？（可选，用于对话与版本标题）" maxLength={240} value={intent} onChange={e=>{setIntent(e.target.value);setSaved(false);}} className="w-full px-2 py-1 border rounded bg-[var(--panel)]"/>
   <div className="flex gap-2">
    <input aria-label="新文件路径" placeholder="src/new-file.ts" value={newPath} onChange={e=>setNewPath(e.target.value)} className="px-2 py-1 border rounded bg-[var(--panel)]"/>
-   <button disabled={blocked||submitting||stale} onClick={add}>Add File</button>
-   {current&&(deletablePaths.includes(current.path)||!files.some(f=>f.path===current.path))&&<button disabled={blocked||submitting||stale} onClick={remove}>删除文件</button>}
+   <button className="forge-btn forge-btn-secondary" disabled={blocked||submitting||stale} onClick={add}>Add File</button>
+   {current&&(deletablePaths.includes(current.path)||!files.some(f=>f.path===current.path))&&<button className="forge-btn forge-btn-danger" disabled={blocked||submitting||stale} onClick={remove}>删除文件</button>}
   </div>
   {saved&&<p role="status">草稿已保存在本浏览器；尚未 Apply。</p>}
   {noop&&<p role="status">没有需要应用的更改；未运行构建或验收，也未创建新版本。</p>}

@@ -43,9 +43,10 @@ import {
   updateTask,
 } from './supabase.js';
 
+import {PREVIEW_RUNTIME_FINGERPRINT} from './preview-platform.js';
 const verificationMode = () => browserVerificationEnabled(config.browserVerificationEnabled) ? 'full' : 'http';
 const currentVerifyBasis = (acceptance,buildBasis,mode) => mode==='http' ? httpVerificationFingerprint(acceptance,buildBasis)
-  : verifyFingerprint(acceptance,{runnerHash:sha256(RUNNER_SOURCE),playwrightVersion:PLAYWRIGHT_VERSION,buildBasis});
+  : verifyFingerprint(acceptance,{runnerHash:sha256(RUNNER_SOURCE+PREVIEW_RUNTIME_FINGERPRINT),playwrightVersion:PLAYWRIGHT_VERSION,buildBasis});
 
 const defaultDeps = { chat, appendStep, updateTask, updateProject, savePlan, addMessage, getLatestPlanVersion, listFiles, checkLease: null };
 
@@ -310,6 +311,7 @@ async function runTool(ctx, tool, args) {
       }
       const start = async () => {
       let commandId;
+      await sandbox.ensurePreviewPlatform?.(sandboxId);
       let ready = await sandbox.isPortListening(sandboxId, 5173);
       if (ready) {
         const http = await sandbox.exec(sandboxId, 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5173/', { timeoutMs: 10000 });
@@ -348,7 +350,7 @@ async function runTool(ctx, tool, args) {
       // Turning off new browser checks cannot erase an already proven blocker on identical source/basis.
       const previousFull=ctx.workspace?.state.verify;
       if(httpOnly&&previousFull?.status==='blocker'
-        &&ctx.workspace.valid('verify',currentVerifyBasis(ctx.acceptance,ctx.buildBasis,'full'))
+        &&[currentVerifyBasis(ctx.acceptance,ctx.buildBasis,'full'),verifyFingerprint(ctx.acceptance,{runnerHash:sha256(RUNNER_SOURCE),playwrightVersion:PLAYWRIGHT_VERSION,buildBasis:ctx.buildBasis})].some(basis=>ctx.workspace.valid('verify',basis))
         &&reclassifyStoredVerification(previousFull.result,ctx.acceptance)?.kind==='blocker')
         throw new AgentStopError('VERIFY_FAILED','当前源码仍有已确认的阻断问题；需实际修改代码，关闭浏览器验收不能将它改为通过。');
       if (ctx.workspace?.valid('verify', ctx.verifyBasis)) {
@@ -781,10 +783,12 @@ export async function executeTask(task) {
         if (plan.id !== frozen.basis_id || plan.version !== task.plan_version) throw sourceError('WORKSPACE_BASIS_INVALID', 'Fixed regression basis changed');
         const acceptance = validateAcceptance(plan.content.acceptance);
         const buildBasis = buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId));
-        const fullBasis = verifyFingerprint(acceptance, { runnerHash: sha256(RUNNER_SOURCE), playwrightVersion: PLAYWRIGHT_VERSION, buildBasis });
+        const fullBasis = currentVerifyBasis(acceptance,buildBasis,'full');
+        const legacyFullBasis=verifyFingerprint(acceptance,{runnerHash:sha256(RUNNER_SOURCE),playwrightVersion:PLAYWRIGHT_VERSION,buildBasis});
+        const legacyHttpBasis=httpVerificationFingerprint(acceptance,buildBasis,{legacy:true});
         const healthBasis=userApplyHealthFingerprint(acceptance,buildBasis);
         const httpBasis=httpVerificationFingerprint(acceptance,buildBasis);
-        if (buildBasis !== frozen.build_basis || ![fullBasis,healthBasis,httpBasis].includes(frozen.verify_basis))
+        if (buildBasis !== frozen.build_basis || ![fullBasis,legacyFullBasis,healthBasis,httpBasis,legacyHttpBasis].includes(frozen.verify_basis))
           throw sourceError('WORKSPACE_BASIS_INVALID', 'Stable validation basis is not compatible with this runtime; Apply stopped');
         const snapshot=await getCheckpointSource(frozen.checkpoint_id,task.project_id);
         const policy=userApplyPolicy(snapshot.files,workspace.manifest.files);

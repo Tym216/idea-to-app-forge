@@ -327,3 +327,10 @@ export async function getAppVersion(id:string):Promise<AppVersion> {
  const {data,error}=await supabase.from('ita_snapshots').select('*').eq('id',id).single();
  if(error) throw error;return data;
 }
+
+/** Small technical checkpoint receipt; no duplicate source download on every workspace poll. */
+export async function getCheckpointIdentity(id:string,projectId:string) {
+ const {data,error}=await supabase.from('ita_snapshots').select('id,project_id,workspace_revision,code_hash,app_version_id')
+  .eq('id',id).eq('project_id',projectId).eq('kind','checkpoint').single();
+ if(error)throw error;return data;
+}

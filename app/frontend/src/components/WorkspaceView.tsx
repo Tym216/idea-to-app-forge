@@ -2,15 +2,16 @@ import {ConversationTimeline} from './ConversationTimeline';
 import {getAppVersion} from '@/lib/data';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Code2, Download, FileText, Monitor, PanelLeftClose, PanelLeftOpen, Send } from 'lucide-react';
-import { activeTask, defaultMode, stableWorkspace, readyPreview } from '@/lib/workspaceState';
+import { activeTask, defaultMode, currentAppVersionId, stableWorkspace, readyPreview } from '@/lib/workspaceState';
 import { VersionsPanel } from './VersionsPanel';
 import type { ApplyReceipt, EditSubmission } from './CodeExplorer';
-import type { AppVersion, Message, Plan, PlanFeedback, PreviewRecovery, Project, ProjectFile, Task } from '@/lib/supabase';
+import type { AppVersion, CheckpointIdentity, Message, Plan, PlanFeedback, PreviewRecovery, Project, ProjectFile, Task } from '@/lib/supabase';
 import { approvePlan, retryTask, revisePlan } from '@/lib/data';
 import { splitTasks, viewState } from '@/lib/taskView';
 import { TaskPanel } from './TaskPanel';
 import { PlanPanel } from './PlanPanel';
 import { CodeExplorer } from './CodeExplorer';
+import type {PreviewStorageIdentity} from '@/lib/previewStorage';
 import { PreviewPane } from './PreviewPane';
 
 export type Mode = 'plan' | 'build';
@@ -25,6 +26,7 @@ export type WorkspaceActions = {
 type Props = {
   project: Project | null;
   versions?:AppVersion[];
+  checkpoint?:CheckpointIdentity|null;
   onApply?:(input:EditSubmission)=>Promise<ApplyReceipt>;
   onRestore?:(id:string,requestId:string,baseRevision:number)=>Promise<ApplyReceipt>;
   messages: Message[];
@@ -40,10 +42,12 @@ type Props = {
   memory: ReactNode;
   actions?: WorkspaceActions;
   previewUrl?: string | null;
+  storageIdentity?:PreviewStorageIdentity;
   recovery?: PreviewRecovery | null;
   recoveryError?: string;
   recoveryPending?: boolean;
   onRecoverPreview?: () => void;
+  onUpgradePreview?:()=>void;
   viewingVersionId?:string|null;
   onViewingVersion?:(id:string|null)=>void;
   checkingWorkspace?:boolean;
@@ -70,35 +74,36 @@ export function WorkspaceView(props: Props) {
   const mode=modeChoice ?? defaultMode(project);
   const versions=props.versions ?? [];
   const deletablePaths=messages.flatMap(m=>Array.isArray(m.meta?.createdFiles)?m.meta.createdFiles.filter((p):p is string=>typeof p==='string'):[]);
-  const workingDraft=!stableWorkspace(project,versions.find(v=>v.id===project?.checkpoint_id)) || activeTask(tasks);
+  const currentId=currentAppVersionId(project,props.checkpoint);
+  const workingDraft=!stableWorkspace(project,props.checkpoint ?? versions.find(v=>v.id===project?.checkpoint_id)) || activeTask(tasks);
   const [viewed,setViewed]=useState<AppVersion|null>(null);
   const [versionError,setVersionError]=useState('');
   const versionRequest=useRef(0);
   const restoreRequests=useRef(new Map<string,string>());
   const [restorePending,setRestorePending]=useState(false),[restoreNotice,setRestoreNotice]=useState(''),[restoreTaskId,setRestoreTaskId]=useState('');
   const restoreTask=tasks.find(t=>t.id===restoreTaskId);
-  const restoreStatus=restoreTask?.status==='succeeded'?'已恢复源码并创建新版本；请查看版本卡片的检查结论。':restoreTask?.status==='failed'?'恢复未完成；已确认的源码保留，可查看任务详情并重试。':restoreTask?.status==='paused'?'恢复已暂停，代码与进度保留。':restoreNotice;
+  const restoreStatus=restoreTask?.status==='succeeded'?'已恢复到所选 App 版本；请查看检查结论。':restoreTask?.status==='failed'?'恢复未完成；已确认的源码保留，可查看任务详情并重试。':restoreTask?.status==='paused'?'恢复已暂停，代码与进度保留。':restoreNotice;
   const restoreBlocked=activeTask(tasks)||project?.workspace_state!=='confirmed'||!!project?.workspace_writer||!!props.recoveryPending||['queued','running'].includes(props.recovery?.status??'')||restorePending;
   const restore=async(v:AppVersion)=>{
    if(!props.onRestore||!project||restoreBlocked)return;
-   if(!window.confirm('恢复 App v'+v.version_number+' 到当前工作区？当前源码将被替换，未 Apply 的本地草稿可能过期。历史版本保留；成功后创建新版本，不回滚业务数据。'))return;
+   if(!window.confirm('恢复 App v'+v.version_number+' 到当前工作区？当前源码将被替换，未 Apply 的本地草稿可能过期。历史版本保留；完成后该版本成为当前使用版本，不回滚业务数据。'))return;
    const key=v.id+':'+project.workspace_revision;
    if(!restoreRequests.current.has(key))restoreRequests.current.set(key,crypto.randomUUID());
    setRestorePending(true);setRestoreNotice('');
    try{const receipt=await props.onRestore(v.id,restoreRequests.current.get(key)!,project.workspace_revision??0);
-    setRestoreTaskId(receipt.noop?'':receipt.task_id);
-    setRestoreNotice(receipt.noop?'当前源码已与该版本一致；未创建新 revision 或版本。':'恢复已提交，Worker 正在应用并检查；完成后才创建新版本。');
+    setRestoreTaskId('task_id' in receipt?receipt.task_id:'');
+    setRestoreNotice(receipt.noop?'当前源码已与该版本一致；未创建新 revision 或版本。':'恢复已提交，Worker 正在应用并检查；完成后切换到所选版本。');
     if(!receipt.noop)void viewVersion(null);
    }catch(e){setRestoreNotice(e instanceof Error?e.message:'恢复未提交，请刷新后重试。');}finally{setRestorePending(false);}
   };
   const viewVersion=async(id:string|null)=>{
     const n=++versionRequest.current;
-    if(!id||id===project?.checkpoint_id){setViewed(null);setVersionError('');props.onViewingVersion?.(null);pick('code');return;}
+    if(!id||(id===currentId&&!workingDraft)){setViewed(null);setVersionError('');props.onViewingVersion?.(null);pick('code');return;}
     try {const v=await getAppVersion(id);if(v.project_id!==project?.id)throw Error('版本不属于当前项目');
      if(n===versionRequest.current){setViewed(v);setVersionError('');props.onViewingVersion?.(id);pick('code');}
     }catch{if(n===versionRequest.current)setVersionError('版本源码暂时无法读取，请稍后重试。');}
   };
-  useEffect(()=>{const id=props.viewingVersionId;if(id&&id!==project?.checkpoint_id&&project)void viewVersion(id);},[props.viewingVersionId,project?.id,project?.checkpoint_id]);
+  useEffect(()=>{const id=props.viewingVersionId;if(id&&project)void viewVersion(id);},[props.viewingVersionId,project?.id,currentId,workingDraft]);
   const [prompt, setPrompt] = useState('');
   const [sending, setSending] = useState(false);
   const [sideOpen, setSideOpen] = useState(true);
@@ -167,7 +172,7 @@ export function WorkspaceView(props: Props) {
           <aside className="lg:w-[380px] shrink-0 flex flex-col min-h-0 max-h-[55dvh] lg:max-h-none border-b lg:border-b-0 lg:border-r border-[var(--line)] bg-[var(--panel)]">
             <div className="flex-1 min-h-0 overflow-auto">
               {props.checkingWorkspace&&<p role="status" className="p-3 text-sm">正在确认工作区状态…</p>}
-              <ConversationTimeline plans={plans} messages={messages} tasks={tasks} versions={versions} currentId={project?.checkpoint_id}
+              <ConversationTimeline plans={plans} messages={messages} tasks={tasks} versions={versions} currentId={currentId}
                 onVersion={id=>void viewVersion(id)} onChanged={onChanged}/>
               <details className="px-4 pb-3"><summary>开发者诊断与任务详情</summary>
                <TaskPanel current={current} history={history} onChanged={onChanged} retry={actions.retry}/>
@@ -246,14 +251,14 @@ export function WorkspaceView(props: Props) {
           </div>
           <div className="flex-1 min-h-0 bg-[var(--panel)]">
             {tab === 'plan' && <PlanPanel plans={plans} feedback={feedback} busy={busy} onChanged={onChanged} actions={actions} />}
-            <div className={tab==='preview'?'h-full':'hidden'}><PreviewPane checkingWorkspace={props.checkingWorkspace} label={workingDraft ? 'Working Workspace · 正在处理或有未发布修改' : 'Working Workspace · 检查时对应 App v'+versions.find(v=>v.id===project?.checkpoint_id)?.version_number} url={props.previewUrl!==undefined ? props.previewUrl : readyPreview(project,props.recovery) ? props.recovery?.preview_url ?? null : null} state={state}
+            <div className={tab==='preview'?'h-full':'hidden'}><PreviewPane storageIdentity={props.storageIdentity} checkingWorkspace={props.checkingWorkspace} label={workingDraft ? 'Working Workspace · 正在处理或有未发布修改' : 'Working Workspace · 检查时对应 App v'+versions.find(v=>v.id===currentId)?.version_number} url={props.previewUrl!==undefined ? props.previewUrl : readyPreview(project,props.recovery) ? props.recovery?.preview_url ?? null : null} state={state}
               recovery={props.recovery?.sandbox_id === project?.sandbox_id && props.recovery?.project_id === project?.id ? props.recovery : null}
-              recoveryError={props.recoveryError} recoveryPending={props.recoveryPending} onRecover={props.onRecoverPreview} /></div>
+              recoveryError={props.recoveryError} recoveryPending={props.recoveryPending} onRecover={props.onRecoverPreview} onUpgradePlatform={props.onUpgradePreview} /></div>
             {versionError&&<p role="alert">{versionError}</p>}
             {restoreStatus&&<p role="status" className="p-2 text-sm">{restoreStatus}</p>}
-            {tab==='code'&&<div className="p-2 text-xs border-b"> {viewed?'Version '+viewed.version_number+' · 历史源码只读':'Current · Version '+(versions.find(v=>v.id===project?.checkpoint_id)?.version_number??'—')+(workingDraft?' · 有未发布修改':'')}
+            {tab==='code'&&<div className="p-2 text-xs border-b"> {viewed?'Version '+viewed.version_number+' · 历史源码只读':'Current · Version '+(versions.find(v=>v.id===currentId)?.version_number??'—')+(workingDraft?' · 有未发布修改':'')}
               {viewed&&<button className="ml-3" onClick={()=>void viewVersion(null)}>查看 Current</button>}
-              {viewed&&props.onRestore&&<button className="ml-3" disabled={restoreBlocked} onClick={()=>void restore(viewed)}>恢复此版本到当前工作区</button>}
+              {viewed&&props.onRestore&&<button className="forge-btn forge-btn-secondary ml-3" disabled={restoreBlocked} onClick={()=>void restore(viewed)}>恢复此版本到当前工作区</button>}
             </div>}
             <div className={tab==='code'&&!viewed ? 'h-full' : 'hidden'}><CodeExplorer projectId={project?.id} deletablePaths={deletablePaths} files={files} readonly={!props.onApply}
               revision={project?.workspace_revision ?? 0} task={current ?? undefined}
@@ -261,7 +266,7 @@ export function WorkspaceView(props: Props) {
               onApply={props.onApply}/></div>
             {tab==='code'&&viewed&&<CodeExplorer key={viewed.id} readonly files={viewed.files.map(f=>({...f,id:f.path,project_id:viewed.project_id,updated_at:viewed.created_at}))}/>}
             {tab==='preview'&&viewed&&<p className="p-2 text-xs">历史源码已选中；预览仍是当前工作区。历史运行预览暂不支持。</p>}
-            {tab === 'versions' && <VersionsPanel versions={versions} currentId={project?.checkpoint_id} workingDraft={workingDraft} onSelect={id=>void viewVersion(id)} onRestore={props.onRestore?v=>restore(v):undefined} restoreBlocked={restoreBlocked}/>}
+            {tab === 'versions' && <VersionsPanel versions={versions} currentId={currentId} workingDraft={workingDraft} onSelect={id=>void viewVersion(id)} onRestore={props.onRestore?v=>restore(v):undefined} restoreBlocked={restoreBlocked}/>}
           </div>
         </main>
       </div>

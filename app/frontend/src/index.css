@@ -140,3 +140,19 @@ pre, code, .font-mono {
 @keyframes forge-pulse { 50% { opacity: .35; } }
 .pulse-dot { animation: forge-pulse 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .pulse-dot { animation: none; } }
+
+/* Shared product actions: primary commit, secondary tools, neutral discard, destructive delete. */
+.forge-btn { display:inline-flex;align-items:center;justify-content:center;gap:.4rem;min-height:34px;padding:7px 12px;border:1px solid transparent;border-radius:8px;font-weight:600;line-height:1.3;transition:background .15s,box-shadow .15s; }
+.forge-btn:focus-visible { outline:3px solid #c4b5fd;outline-offset:2px; }
+.forge-btn:disabled { opacity:.45;cursor:not-allowed; }
+.forge-btn-primary { color:white;background:#5b5bd6;border-color:#5b5bd6;box-shadow:0 2px 4px #5b5bd626; }
+.forge-btn-primary:hover:not(:disabled) { background:#4848bd; }
+.forge-btn-secondary { color:#4747b8;background:#eeeeff;border-color:#c7c7f2; }
+.forge-btn-secondary:hover:not(:disabled) { background:#e0e0ff; }
+.forge-btn-neutral { color:#475569;background:#f8fafc;border-color:#cbd5e1; }
+.forge-btn-neutral:hover:not(:disabled) { background:#e2e8f0; }
+.forge-btn-danger { color:#be123c;background:#fff1f2;border-color:#fecdd3; }
+.forge-btn-danger:hover:not(:disabled) { background:#ffe4e6; }
+.forge-version-card { display:flex;align-items:center;gap:8px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc; }
+.forge-version-current { border-color:#b5b5ec;background:#f5f5ff;box-shadow:0 0 0 1px #5b5bd610; }
+.forge-current-badge { font-size:10px;padding:3px 7px;border-radius:999px;background:#5b5bd6;color:white; }

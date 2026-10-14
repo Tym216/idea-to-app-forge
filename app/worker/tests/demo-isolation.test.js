@@ -84,7 +84,7 @@ function ownerFixture(owner={projectId:'projectB',userId:'userB'}) {
 }
 function projectExits(p,sb) {
  return [
-  ['ensure',()=>p.ensure(sb.id)],['resolve',()=>p.resolve(sb.id)],
+  ['ensure',()=>p.ensure(sb.id)],['platform upgrade',()=>p.ensurePreviewPlatform(sb.id)],['resolve',()=>p.resolve(sb.id)],
   ['getOwned',()=>p.getOwned(sb.id)],['guarded get',()=>p.client.get(sb.id)],
   ['exec',()=>p.exec(sb.id,'touch x')],['write',()=>p.writeFile(sb.id,'src/a.ts','source')],
   ['read',()=>p.readFile(sb.id,'src/a.ts')],['background',()=>p.startBackground(sb.id,'vite')],
