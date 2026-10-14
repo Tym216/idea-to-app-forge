@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { resolveCostPolicy, assertCostExecution, estimateRequestCost, reserveRequestCost } from './llm-cost-admission.js';
+import { resolveCostPolicy, assertCostExecution, estimateRequestCost, reserveRequestCost, estimateUsageCost } from './llm-cost-admission.js';
 import { resolveOutputCap } from './llm-output-cap.js';
 import { resolveTemperatureOmission } from './llm-temperature.js';
 import { resolveReasoningPolicy } from './llm-reasoning-policy.js';
@@ -149,6 +149,7 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
       let recordedUsage;
       let failureCode;
       let usageBreakdown;
+      let usageCostEstimate;
       let providerReportedCostUsd = null;
       const diagnostic = requestDiagnostics({ requestId: request.requestId, logicalCallId, attempt,
         provider: provider.name, model: provider.model, purpose, timeoutMs: config.llmTimeoutMs ?? LLM_REQUEST_TIMEOUT_MS,
@@ -200,6 +201,7 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
 
       assertExecutionActive();
       const normalized = normalizeResponse(payload);
+      usageCostEstimate = estimateUsageCost(costPolicy, normalized.usage);
       const content = normalized.text;
       const ms = Math.max(0, performance.now() - started);
       const { usageDetails, breakdown } = mapUsage(normalized.usage?.details);
@@ -265,11 +267,13 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
         logger.info('model.request', { task_id: taskId ?? null, execution_id: executionId,
           ...diagnostics, ...measured, ...debugPaths,
           ...(usageBreakdown ? { usage_breakdown: usageBreakdown } : {}),
+          ...(usageCostEstimate ? { usage_cost_estimate: usageCostEstimate } : {}),
           ...(costAdmission ? { theoretical_cost_admission: costAdmission } : {}),
           provider_reported_cost_usd: providerReportedCostUsd, failure_code: status === 'failed' ? failureCode : null });
         // Local paths/body capture never enter remote tracing; only safe lifecycle metadata does.
         obs.update({ metadata: { ...diagnostics, request_status: status,
           provider_reported_cost_usd: providerReportedCostUsd,
+          ...(usageCostEstimate ? { usage_cost_estimate: usageCostEstimate } : {}),
           ...(costAdmission ? { theoretical_cost_admission: costAdmission } : {}) } });
       }
     }

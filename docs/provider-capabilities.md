@@ -26,6 +26,7 @@ BUILD_PROVIDER_OPTIONS={}
 | 接口 / 模型 | 行为 |
 | --- | --- |
 | DeepSeek `deepseek-flash` / `deepseek-v4-pro` | 显式 thinking 开关；开启时发送 low/high，省略无效 temperature |
+| Aliyun OpenAI-compatible | 已确认的 Qwen3.8 Flash/Max、DeepSeek-V4-Pro 支持 trusted none 和总输出 cap；人民币价格配置与切换步骤见 [阿里云说明](aliyun-provider.md)；未实测 |
 | OpenRouter | 映射为 reasoning.effort；记录 unconfirmed 与 warning，上游支持与否由实际响应决定；不假装关掉不可关闭的推理 |
 | Gemini 2.5 / 3 兼容端点 | 已确认的 reasoning_effort 映射可发送；无法确认关闭推理的模型省略 off 参数并警告，实际模式由上游决定 |
 | Ollama / LM Studio | 默认不猜模型能力；显式 profile 后发送 reasoning_effort，记录能力未确认警告 |

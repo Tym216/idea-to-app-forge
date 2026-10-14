@@ -42,7 +42,7 @@ export function describeLlm(settings) {
       capBlock = { code: 'LLM_COST_OUTPUT_CAP_REQUIRED' };
     const theoreticalProjection = outputBudget.maxOutputTokens == null ? null
       : estimateRequestCost(costPolicy, JSON.stringify(body), outputBudget.maxOutputTokens);
-    stages[stage] = { ...(capBlock ? { inferenceBlocked: true, code: capBlock.code } : {}), outputCap: body.max_tokens ?? null, outputCapSource: outputBudget.outputCapSource,
+    stages[stage] = { ...(capBlock ? { inferenceBlocked: true, code: capBlock.code } : {}), outputCap: body.max_completion_tokens ?? body.max_tokens ?? null, outputCapSource: outputBudget.outputCapSource,
       theoreticalProjection: theoreticalProjection?.diagnostics ?? null,
       requestedTemperature: temperature, sentTemperature: body.temperature ?? null,
       temperatureOmitted: capability.temperatureOmitted, temperatureOmitSource: capability.temperatureOmitSource,

@@ -1,13 +1,19 @@
+import { aliyunCapabilities, ALIYUN_OUTPUT_TOKEN_MARGIN } from './aliyun-capabilities.js';
 import { currentExecution, assertExecutionActive } from './execution-control.js';
 import { parseOutputTokenCap } from './llm-output-cap.js';
 
 // Full final JSON body, with no exclusions (even non-prompt fields), plus template overhead.
 // This is a conservative local exposure model, not a tokenizer or an actual billing metric.
 export const INPUT_TOKEN_SAFETY_MARGIN = 2048;
-const SCALE = 1_000_000_000_000n; // USD picodollars: costs round UP, ceiling rounds DOWN.
+const SCALE = 1_000_000_000_000n; // 1e-12 currency units: costs round UP, ceiling rounds DOWN.
 const MILLION = 1_000_000n;
 const ledgers = new Map(); // Never reset/release an identity's reservation within this process.
 const fail = (code, message) => Object.assign(new Error(message), { code });
+const genericFields = [
+  ['llmCostInputPerMillion', 'LLM_COST_INPUT_PER_MILLION'],
+  ['llmCostOutputPerMillion', 'LLM_COST_OUTPUT_PER_MILLION'],
+  ['llmMaxTheoreticalCostPerExecution', 'LLM_MAX_THEORETICAL_COST_PER_EXECUTION'],
+];
 const fields = [
   ['llmCostInputUsdPerMillion', 'LLM_COST_INPUT_USD_PER_MILLION'],
   ['llmCostOutputUsdPerMillion', 'LLM_COST_OUTPUT_USD_PER_MILLION'],
@@ -43,22 +49,30 @@ export function parseCostDecimal(value, label = 'cost field') {
 }
 const numeric = (r) => r.value;
 const ceil = (n, d) => (n + d - 1n) / d;
-const usd = (units) => Number(units.toString() + 'e-12');
+const unitsToCost = (units) => Number(units.toString() + 'e-12');
 
 export function resolveCostPolicy(settings) {
   const required = parseRequireCostBudget(settings.llmRequireCostBudget);
-  const values = fields.map(([key, label]) => parseCostDecimal(settings[key], label));
+  const generic = settings.llmCostCurrency != null && settings.llmCostCurrency !== ''
+    || genericFields.some(([key]) => settings[key] != null && settings[key] !== '');
+  const currency = generic ? settings.llmCostCurrency : 'USD';
+  if (!['USD', 'CNY'].includes(currency)) throw fail('LLM_COST_CONFIG', 'LLM_COST_CURRENCY must be USD or CNY for generic pricing');
+  if (generic && fields.some(([key]) => settings[key] != null && settings[key] !== ''))
+    throw fail('LLM_COST_CONFIG', 'Do not mix generic currency pricing with legacy USD pricing');
+  const selectedFields = generic ? genericFields : fields;
+  const values = selectedFields.map(([key, label]) => parseCostDecimal(settings[key], label));
   const [input, output, budget] = values;
   if (required && budget && budget.numerator <= 0n)
-    throw fail('LLM_COST_CONFIG', 'LLM_MAX_THEORETICAL_COST_USD_PER_EXECUTION must be positive');
+    throw fail('LLM_COST_CONFIG', selectedFields[2][1] + ' must be positive');
   if (required && values.some(v => v == null))
     throw fail('LLM_COST_BUDGET_REQUIRED', 'Required theoretical cost configuration is incomplete');
   const ceiling = budget ? budget.numerator * SCALE / budget.denominator : null;
   if (required && ceiling <= 0n)
     throw fail('LLM_COST_CONFIG', 'Execution budget is below accounting precision');
-  return { required, input, output, ceiling,
+  return { required, currency, input, output, ceiling,
     inputRate: input ? numeric(input) : null, outputRate: output ? numeric(output) : null,
-    budgetUsd: ceiling == null ? null : usd(ceiling) };
+    budget: ceiling == null ? null : unitsToCost(ceiling),
+    budgetUsd: currency === 'USD' && ceiling != null ? unitsToCost(ceiling) : null };
 }
 
 export function costPolicyProblems(settings) {
@@ -67,10 +81,12 @@ export function costPolicyProblems(settings) {
 
 export function describeCostPolicy(settings) {
   const p = resolveCostPolicy(settings);
-  return { required: p.required, input_rate_usd_per_million: p.inputRate,
-    output_rate_usd_per_million: p.outputRate, execution_budget_usd: p.budgetUsd,
+  return { required: p.required, cost_currency: p.currency,
+    input_rate_per_million: p.inputRate, output_rate_per_million: p.outputRate, execution_budget: p.budget,
+    ...(p.currency === 'USD' ? { input_rate_usd_per_million: p.inputRate,
+      output_rate_usd_per_million: p.outputRate, execution_budget_usd: p.budget } : {}),
     input_safety_margin_tokens: INPUT_TOKEN_SAFETY_MARGIN,
-    accounting: 'picodollars; reservation rounds up; ceiling rounds down',
+    accounting: '1e-12 currency units; reservation rounds up; ceiling rounds down',
     ledger_allocated: false };
 }
 
@@ -85,20 +101,37 @@ export function estimateRequestCost(policy, requestBody, trustedOutputCap) {
   try { body = JSON.parse(requestBody); } catch {
     throw fail('LLM_COST_REQUEST_INVALID', 'Final serialized request must be valid JSON');
   }
-  // Only the existing reviewed adapter currently proves the final cap contract.
-  if (body.max_tokens !== cap || Object.hasOwn(body, 'max_completion_tokens'))
+  const totalCap = body.max_completion_tokens === cap && !Object.hasOwn(body, 'max_tokens') && aliyunCapabilities(body.model);
+  if (!totalCap && (body.max_tokens !== cap || Object.hasOwn(body, 'max_completion_tokens')))
     throw fail('LLM_COST_OUTPUT_CAP_REQUIRED', 'Final request does not match the trusted output cap');
+  // Aliyun documents up to 10 extra tokens; reserve that margin on every physical request.
+  const outputTokens = cap + (totalCap ? ALIYUN_OUTPUT_TOKEN_MARGIN : 0);
   const bytes = Buffer.byteLength(requestBody, 'utf8');
   const inputTokens = bytes + INPUT_TOKEN_SAFETY_MARGIN;
   const inputUnits = ceil(BigInt(inputTokens) * policy.input.numerator * SCALE, policy.input.denominator * MILLION);
-  const outputUnits = ceil(BigInt(cap) * policy.output.numerator * SCALE, policy.output.denominator * MILLION);
+  const outputUnits = ceil(BigInt(outputTokens) * policy.output.numerator * SCALE, policy.output.denominator * MILLION);
   const units = inputUnits + outputUnits;
   return { units, diagnostics: {
     serialized_body_bytes: bytes, input_upper_bound_tokens: inputTokens,
-    output_upper_bound_tokens: cap, input_rate_usd_per_million: policy.inputRate,
-    output_rate_usd_per_million: policy.outputRate, request_theoretical_max_usd: usd(units),
-    execution_budget_usd: policy.budgetUsd,
+    output_upper_bound_tokens: outputTokens, cost_currency: policy.currency,
+    input_rate_per_million: policy.inputRate, output_rate_per_million: policy.outputRate,
+    request_theoretical_max: unitsToCost(units), execution_budget: policy.budget,
+    ...(policy.currency === 'USD' ? { input_rate_usd_per_million: policy.inputRate,
+      output_rate_usd_per_million: policy.outputRate, request_theoretical_max_usd: unitsToCost(units),
+      execution_budget_usd: policy.budget } : {}),
   } };
+}
+
+
+/** Usage-based estimate at configured rates; not a supplier invoice or cache-discount claim. */
+export function estimateUsageCost(policy, usage) {
+  const input = usage?.inputTokens, output = usage?.outputTokens;
+  if (!policy.input || !policy.output || !Number.isSafeInteger(input) || input < 0
+      || !Number.isSafeInteger(output) || output < 0) return null;
+  const units = ceil(BigInt(input) * policy.input.numerator * SCALE, policy.input.denominator * MILLION)
+    + ceil(BigInt(output) * policy.output.numerator * SCALE, policy.output.denominator * MILLION);
+  return { currency: policy.currency, input_tokens: input, output_tokens: output,
+    estimated_cost: unitsToCost(units), billing_verified: false, cache_discounts_applied: false };
 }
 
 function executionIdentity(taskId) {
@@ -125,7 +158,7 @@ export function reserveRequestCost(policy, requestBody, trustedOutputCap, { task
   const context = executionIdentity(taskId);
   const estimate = estimateRequestCost(policy, requestBody, trustedOutputCap);
   const key = JSON.stringify([context.taskId, context.executionId]);
-  const signature = JSON.stringify([policy.input.numerator.toString(), policy.input.denominator.toString(),
+  const signature = JSON.stringify([policy.currency, policy.input.numerator.toString(), policy.input.denominator.toString(),
     policy.output.numerator.toString(), policy.output.denominator.toString(), policy.ceiling.toString()]);
   let ledger = ledgers.get(key);
   if (!ledger) { ledger = { signature, reserved: 0n }; ledgers.set(key, ledger); }
@@ -135,8 +168,8 @@ export function reserveRequestCost(policy, requestBody, trustedOutputCap, { task
   const admitted = before + estimate.units <= policy.ceiling;
   if (admitted) ledger.reserved += estimate.units;
   const diagnostics = { ...estimate.diagnostics, purpose, execution_id: context.executionId,
-    physical_attempt: attempt ?? null, execution_reserved_before: usd(before),
-    execution_reserved_after: usd(ledger.reserved), admitted };
+    physical_attempt: attempt ?? null, execution_reserved_before: unitsToCost(before),
+    execution_reserved_after: unitsToCost(ledger.reserved), admitted };
   if (!admitted) {
     const error = fail('LLM_COST_BUDGET_EXCEEDED', 'The next provider request exceeds this execution theoretical cost budget');
     error.costAdmission = diagnostics;

@@ -1,3 +1,5 @@
+import { aliyunCapabilities } from './aliyun-capabilities.js';
+
 /** Trusted purpose-specific policy; no global effort or model-specific guesses. */
 export const REASONING_EFFORTS = Object.freeze(['none', 'low', 'medium', 'high']);
 const policyError = (code, message) => Object.assign(new Error(message), { code });
@@ -48,12 +50,20 @@ export function resolveReasoningPolicy(settings, purpose = 'unspecified') {
 }
 
 /** Final request invariant after native mapping; replace, never merge enabling subfields. */
-export function applyReasoningPolicy(body, { providerName, trustedReasoningEffort, requireReasoningPolicy = false }) {
+export function applyReasoningPolicy(body, { providerName, model, trustedReasoningEffort, requireReasoningPolicy = false }) {
   const effort = parseReasoningEffort(trustedReasoningEffort);
   const required = parseRequireReasoningPolicy(requireReasoningPolicy);
   if (effort == null) {
     if (required) throw policyError('LLM_REASONING_POLICY_REQUIRED', 'LLM_REASONING_POLICY_REQUIRED: 当前推理没有可信 reasoning policy');
     return {};
+  }
+  if (providerName === 'aliyun' && aliyunCapabilities(model) && effort === 'none') {
+    // Trusted off overrides optional enablement; no OpenRouter routing fields.
+    body.enable_thinking = false;
+    delete body.reasoning_effort;
+    delete body.thinking_budget;
+    if (aliyunCapabilities(model).preserveThinking) body.preserve_thinking = false;
+    return { effectiveReasoningEffort: 'none' };
   }
   if (providerName !== 'openrouter')
     throw policyError('LLM_REASONING_POLICY_UNSUPPORTED', 'LLM_REASONING_POLICY_UNSUPPORTED: 当前 adapter 尚无已确认的可信 reasoning policy 映射');

@@ -44,6 +44,10 @@ export const config = {
   llmMaxOutputTokensActionPlan: optional('LLM_MAX_OUTPUT_TOKENS_ACTION_PLAN'),
   llmReasoningEffortActionPlan: optional('LLM_REASONING_EFFORT_ACTION_PLAN'),
   llmRequireCostBudget: optional('LLM_REQUIRE_COST_BUDGET'),
+  llmCostCurrency: optional('LLM_COST_CURRENCY'),
+  llmCostInputPerMillion: optional('LLM_COST_INPUT_PER_MILLION'),
+  llmCostOutputPerMillion: optional('LLM_COST_OUTPUT_PER_MILLION'),
+  llmMaxTheoreticalCostPerExecution: optional('LLM_MAX_THEORETICAL_COST_PER_EXECUTION'),
   llmCostInputUsdPerMillion: optional('LLM_COST_INPUT_USD_PER_MILLION'),
   llmCostOutputUsdPerMillion: optional('LLM_COST_OUTPUT_USD_PER_MILLION'),
   llmMaxTheoreticalCostUsdPerExecution: optional('LLM_MAX_THEORETICAL_COST_USD_PER_EXECUTION'),
@@ -80,6 +84,10 @@ export const config = {
   lmstudioBaseUrl: optional('LMSTUDIO_BASE_URL', 'http://127.0.0.1:1234/v1'),
   lmstudioModel: optional('LMSTUDIO_MODEL'),
   lmstudioJsonMode: optional('LMSTUDIO_JSON_MODE', 'off'),
+
+  aliyunApiKey: optional('ALIYUN_API_KEY'),
+  aliyunBaseUrl: optional('ALIYUN_BASE_URL'),
+  aliyunModel: optional('ALIYUN_MODEL'),
 
   // Daytona 执行环境
   daytonaApiKey: optional('DAYTONA_API_KEY'),

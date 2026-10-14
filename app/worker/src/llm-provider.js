@@ -1,3 +1,4 @@
+import { aliyunCapabilities } from './aliyun-capabilities.js';
 import { costPolicyProblems } from './llm-cost-admission.js';
 import { applyOutputCap, outputCapProblems, resolveOutputCap } from './llm-output-cap.js';
 import { parseOmitTemperature, resolveTemperatureOmission } from './llm-temperature.js';
@@ -7,6 +8,7 @@ import { REASONING_EFFORTS, applyReasoningPolicy, reasoningPolicyProblems, resol
 export const PROVIDERS = Object.freeze({
   deepseek: { prefix: 'DEEPSEEK', field: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', jsonMode: 'auto', help: 'https://platform.deepseek.com' },
   zhipu: { prefix: 'ZHIPU', field: 'zhipu', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-plus', jsonMode: 'auto', help: 'https://open.bigmodel.cn' },
+  aliyun: { prefix: 'ALIYUN', field: 'aliyun', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: '', jsonMode: 'off', help: 'https://help.aliyun.com/zh/model-studio/get-api-key' },
   openrouter: { prefix: 'OPENROUTER', field: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', model: '', jsonMode: 'off', help: 'https://openrouter.ai/settings/keys' },
   gemini: { prefix: 'GEMINI', field: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: '', jsonMode: 'off', help: 'https://aistudio.google.com/apikey' },
   ollama: { prefix: 'OLLAMA', field: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', model: '', jsonMode: 'off', keyOptional: true, help: '本地 Ollama' },
@@ -21,6 +23,8 @@ export function resolveProvider(settings) {
   let parsedUrl;
   try { parsedUrl = new URL(baseUrl); } catch { throw new Error('LLM_BASE_URL 无效；请填写 HTTP(S) API 根地址'); }
   if (!['http:', 'https:'].includes(parsedUrl.protocol) || !parsedUrl.hostname || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash) throw new Error(`LLM_BASE_URL 必须是无内嵌凭证的 HTTP(S) 地址`);
+  if (name === 'aliyun' && !parsedUrl.pathname.endsWith('/compatible-mode/v1'))
+    throw new Error('ALIYUN_BASE_URL 必须使用 OpenAI compatible-mode/v1 地址；当前不支持 apps/anthropic');
   const model = String(settings.llmModel || settings[`${spec.field}Model`] || spec.model).trim();
   const jsonMode = settings.llmJsonMode || settings[`${spec.field}JsonMode`] || spec.jsonMode;
   if (!['auto', 'on', 'off'].includes(jsonMode)) throw new Error(`LLM_JSON_MODE 只能填 auto / on / off`);
@@ -81,6 +85,9 @@ export function resolveNativeOptions(providerName, model, options) {
     if (providerName === 'deepseek' && ['deepseek-flash', 'deepseek-v4-pro'].includes(model)) {
       if (key === 'thinking' && ['enabled', 'disabled'].includes(value?.type)) supported = true;
       if (key === 'reasoning_effort' && ['low', 'high'].includes(value)) supported = true;
+    } else if (providerName === 'aliyun' && aliyunCapabilities(model)) {
+      if (key === 'enable_thinking' && typeof value === 'boolean') supported = true;
+      if (key === 'preserve_thinking' && aliyunCapabilities(model).preserveThinking && typeof value === 'boolean') supported = true;
     } else if (providerName === 'openrouter') {
       if (key === 'reasoning' && REASONING_EFFORTS.includes(value?.effort)) supported = true;
     } else if (providerName === 'gemini' && /^gemini-(2\.5|3)[.-]/.test(model)) {
@@ -107,8 +114,8 @@ export function prepareRequest({ providerName, model, messages, temperature, jso
     : (trustedOmission ? 'trusted_config' : null);
   // Final invariant after native mapping: omission means the property does not exist.
   if (temperatureOmitted) delete body.temperature;
-  const outputBudget = applyOutputCap(body, { providerName, maxOutputTokens, requireOutputCap });
-  const trustedReasoning = applyReasoningPolicy(body, { providerName, trustedReasoningEffort, requireReasoningPolicy });
+  const outputBudget = applyOutputCap(body, { providerName, model, maxOutputTokens, requireOutputCap });
+  const trustedReasoning = applyReasoningPolicy(body, { providerName, model, trustedReasoningEffort, requireReasoningPolicy });
   const jsonSent = Object.hasOwn(body, 'response_format');
   const warnings = [...capability.warnings];
   if (trustedReasoningEffort != null) warnings.push('可信 reasoning policy 已覆盖 native options；已发送 effort=' + trustedReasoningEffort + '，上游实际执行仍需验证');
@@ -157,6 +164,9 @@ export function resolveCapabilities({ providerName, model, reasoningMode = 'off'
     parameters = { thinking: { type: enabled ? 'enabled' : 'disabled' }, ...(enabled ? { reasoning_effort: reasoningMode } : {}) };
     omitTemperature = enabled;
     effectiveReasoning = reasoningMode;
+  } else if (providerName === 'aliyun' && aliyunCapabilities(model) && !enabled) {
+    parameters = { enable_thinking: false };
+    effectiveReasoning = 'off';
   } else if (providerName === 'openrouter') {
     parameters = { reasoning: { effort: enabled ? reasoningMode : 'none' } };
     warnings.push('OpenRouter 已发送推理偏好；是否支持及实际生效取决于所选模型/上游，未自动探测能力');

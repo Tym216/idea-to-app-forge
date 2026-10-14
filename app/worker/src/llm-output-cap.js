@@ -1,3 +1,5 @@
+import { aliyunCapabilities } from './aliyun-capabilities.js';
+
 /** Trusted output budgets; never sourced from user text or provider/native options. */
 export const MAX_OUTPUT_TOKEN_CAP = 131072; // Sanity limit, not a model capability or a Demo choice.
 const capError = (code, message) => Object.assign(new Error(message), { code });
@@ -49,13 +51,18 @@ export function resolveOutputCap(settings, purpose = 'unspecified') {
   return { maxOutputTokens, requireOutputCap, outputCapSource: maxOutputTokens == null ? null : selected[1] };
 }
 
-/** Explicit OpenRouter Chat Completions contract; other adapters require reviewed mappings. */
-export function applyOutputCap(body, { providerName, maxOutputTokens, requireOutputCap = false }) {
+/** Reviewed Chat Completions mappings only; unknown models must not silently drop budgets. */
+export function applyOutputCap(body, { providerName, model, maxOutputTokens, requireOutputCap = false }) {
   const cap = parseOutputTokenCap(maxOutputTokens);
   const required = parseRequireOutputCap(requireOutputCap);
   if (cap == null) {
     if (required) throw capError('LLM_OUTPUT_CAP_REQUIRED', 'LLM_OUTPUT_CAP_REQUIRED: 当前推理没有可信硬输出上限');
     return { effectiveMaxOutputTokens: null, outputCapField: null };
+  }
+  if (providerName === 'aliyun' && aliyunCapabilities(model)) {
+    delete body.max_tokens;
+    body.max_completion_tokens = cap;
+    return { effectiveMaxOutputTokens: cap, outputCapField: 'max_completion_tokens' };
   }
   if (providerName !== 'openrouter')
     throw capError('LLM_OUTPUT_CAP_UNSUPPORTED', 'LLM_OUTPUT_CAP_UNSUPPORTED: 当前 adapter 尚未确认硬输出上限映射');

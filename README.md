@@ -24,7 +24,7 @@ Forge 是一个 idea-to-app 原型：用户用自然语言描述需求，审阅�
 flowchart LR
     UI[React 工作区] -->|登录、提交、批准、轮询| DB[Supabase Auth / Postgres / RPC]
     W[独立 Node Worker] <-->|领取、续租、步骤与代码持久化| DB
-    W -->|模型调用| LLM[智谱 / DeepSeek / OpenRouter / Gemini / Ollama / LM Studio]
+    W -->|模型调用| LLM[智谱 / DeepSeek / OpenRouter / 阿里云 / Gemini / Ollama / LM Studio]
     W -->|文件、命令、浏览器验收| SB[Daytona 沙箱]
     SB -->|预览 URL| UI
     W -. 可选观测 .-> LF[Langfuse]
@@ -123,7 +123,7 @@ MAX_FIX_ROUNDS=1
 
 `glm-4.5-air` 是实际使用过的配置，不代表任意请求都已稳定通过。切换 DeepSeek 时，改为 `LLM_PROVIDER=deepseek`，并填写 `DEEPSEEK_API_KEY`、`LLM_MODEL`；默认模型名为 `deepseek-chat`。没有配置 provider 时，代码默认选择 DeepSeek；智谱的代码默认模型为 `glm-4-plus`，建议显式填写。
 
-也支持 OpenRouter 和 Gemini 直连的 Chat Completions 兼容入口。以下模型名为占位符，必须替换成自己账号可用的文本模型 ID；Key 仅填入 Worker。
+也支持阿里云百炼（[配置与费用说明](docs/aliyun-provider.md)）、OpenRouter 和 Gemini 的 Chat Completions 兼容入口。以下模型名为占位符，必须替换成自己账号可用的文本模型 ID；Key 仅填入 Worker。
 
 ```dotenv
 # 二选一；将另一组保留为空即可
