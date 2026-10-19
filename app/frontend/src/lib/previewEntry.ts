@@ -9,29 +9,68 @@ export async function probePreviewHealth(url:string):Promise<boolean|null> {
  } catch {return null;}
 }
 
-/** Mount/refresh is a read, not a request to recover. Pending jobs are only observed. */
+const HEALTH_TTL_MS=30000;
+const UNKNOWN_LIMIT=3;
+/** Re-entry checks liveness; only failed checks enqueue the existing, fenced recovery flow.
+ * Unknown browser reads are retried twice before requesting a server-side check. A warm
+ * iframe is never remounted by metadata polling, focus, or a successful health check.
+ */
 export function usePreviewEntry({identity,url,pending,canRecover,recover,probe=probePreviewHealth}:{
  identity:string|null;url:string|null;pending:boolean;canRecover:boolean;
  recover:()=>Promise<void>;probe?:(url:string)=>Promise<boolean|null>;
 }) {
- const checks=useRef(new Map<string,Promise<boolean|null>>());
+ const check=useRef<{identity:string;at:number;promise:Promise<boolean|null>;unknownCounted?:boolean}|null>(null);
  const attempts=useRef(new Set<string>());
+ const unknown=useRef({identity:'',count:0});
  const previousPending=useRef(pending);
+ const callbacks=useRef({recover,probe});callbacks.current={recover,probe};
+ const [tick,setTick]=useState(0);
  const [health,setHealth]=useState<{identity:string;healthy:boolean|null}|null>(null);
  useEffect(()=>{
+  const recheck=()=>{
+   if(document.visibilityState==='hidden')return;
+   check.current=null;setTick(n=>n+1);
+  };
+  const visible=()=>{if(document.visibilityState==='visible')recheck();};
+  window.addEventListener('focus',recheck);
+  window.addEventListener('online',recheck);
+  window.addEventListener('pageshow',recheck);
+  document.addEventListener('visibilitychange',visible);
+  const timer=setInterval(recheck,HEALTH_TTL_MS);
+  return()=>{
+   clearInterval(timer);window.removeEventListener('focus',recheck);
+   window.removeEventListener('online',recheck);window.removeEventListener('pageshow',recheck);
+   document.removeEventListener('visibilitychange',visible);
+  };
+ },[]);
+ useEffect(()=>{
   if(!identity)return;
-  // A completed recovery can keep the same URL: discard the old failed health read.
-  if(previousPending.current&&!pending)checks.current.delete(identity);
+  // Recovery may reuse exactly the same URL. Re-read it after the job ends.
+  if(previousPending.current&&!pending)check.current=null;
   previousPending.current=pending;
-  let active=true;
-  let check=checks.current.get(identity);
-  if(!check){check=url?probe(url):Promise.resolve(false);checks.current.set(identity,check);}
-  void check.then(healthy=>{
+  if(unknown.current.identity!==identity)unknown.current={identity,count:0};
+  let active=true;let retry:ReturnType<typeof setTimeout>|undefined;
+  let read=check.current;
+  if(!read||read.identity!==identity||Date.now()-read.at>=HEALTH_TTL_MS){
+   read={identity,at:Date.now(),promise:url?Promise.resolve().then(()=>callbacks.current.probe(url)).catch(()=>null):Promise.resolve(false)};
+   check.current=read;
+  }
+  const currentRead=read;
+  void read.promise.then(healthy=>{
    if(!active)return;
-   setHealth({identity,healthy});
-   if(healthy===false&&!pending&&canRecover)void requestPreviewOnce(identity,attempts.current,recover);
+   // Count observations, not React rerenders that reuse an in-flight promise.
+   if(healthy===true){unknown.current.count=0;attempts.current.delete(identity);}
+   if(healthy===null&&navigator.onLine&&!pending){
+    if(!currentRead.unknownCounted){unknown.current.count++;currentRead.unknownCounted=true;}
+    if(unknown.current.count<UNKNOWN_LIMIT){
+     retry=setTimeout(()=>{if(check.current===currentRead)check.current=null;setTick(n=>n+1);},2000*unknown.current.count);
+    }
+   }
+   const failed=healthy===false||(healthy===null&&navigator.onLine&&unknown.current.count>=UNKNOWN_LIMIT);
+   setHealth({identity,healthy:failed?false:healthy});
+   if(failed&&!pending&&canRecover)void requestPreviewOnce(identity,attempts.current,()=>callbacks.current.recover());
   });
-  return ()=>{active=false;};
- },[identity,url,pending,canRecover,recover,probe]);
+  return ()=>{active=false;if(retry)clearTimeout(retry);};
+ },[identity,url,pending,canRecover,tick]);
  return health?.identity===identity?health.healthy:null;
 }

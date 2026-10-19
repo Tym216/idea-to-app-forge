@@ -8,7 +8,7 @@
     "preview": "vite preview",
     "postinstall": "echo 'Dependencies installed successfully'",
     "test:demo": "node --test tests/environment.test.mjs",
-    "test:ui": "node tests/demo-ui.mjs && node tests/stable-preview-ui.mjs && node tests/persistence-ui.mjs && node tests/workspace-entry-ui.mjs && node tests/new-project-ui.mjs && node tests/preview-storage-ui.mjs",
+    "test:ui": "node tests/demo-ui.mjs && node tests/stable-preview-ui.mjs && node tests/preview-recovery-entry-ui.mjs && node tests/persistence-ui.mjs && node tests/workspace-entry-ui.mjs && node tests/new-project-ui.mjs && node tests/preview-storage-ui.mjs",
     "test:product": "node tests/product-ui.mjs"
   },
   "dependencies": {

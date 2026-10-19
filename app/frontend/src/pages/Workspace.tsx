@@ -78,7 +78,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
     const operation=(async()=>{
     try {
       const before = await getProject(projectId);
-      setPreviewProject(previous=>previous??before);
+      setPreviewProject(before);
       const [m, f, t, pl, fb, vs, job, cp] = await Promise.all([
         listMessages(projectId), listFiles(projectId), listTasks(projectId),
         listPlans(projectId), listPlanFeedback(projectId), listAppVersions(projectId), getPreviewRecovery(projectId),
@@ -121,7 +121,7 @@ function ProjectWorkspace({projectId}:{projectId:string}) {
   const currentRecovery=recovery?.sandbox_id===previewSource?.sandbox_id&&recovery?.project_id===previewSource?.id?recovery:null;
   const previewHealthy=usePreviewEntry({identity:previewIdentity,url:previewSource?.preview_url??null,
     pending:recoveryPending||['queued','running'].includes(currentRecovery?.status??''),
-    canRecover:previewRecoveryKey(project,tasks,files.length>0)!==null,recover:recoverPreview});
+    canRecover:previewRecoveryKey(previewSource,tasks,Boolean(previewSource?.checkpoint_id)||files.length>0)!==null,recover:recoverPreview});
   const savedUrl=previewIdentity&&previewHealthy!==false?previewSource?.preview_url??null:null;
   const checkAndRefreshPreview=useCallback(async()=>{
     const url=previewSource?.preview_url;
