@@ -17,7 +17,7 @@ const server=createServer((req,res)=>{
  res.end(`<!doctype html><html><body><div id="root"></div><script type="module">
  import {previewLoadGuard} from '/guard.js';
  window.__forgePreviewPhase='app-starting';window.__forgeStoragePrepareReload=()=>${scenario==='pending'?'false':'true'};
- await previewLoadGuard({projectId:${JSON.stringify(scenario)}},()=>${scenario==='timeout'?'new Promise(()=>{})':`import('/entry.js?case=${scenario}')`},{timeoutMs:700,retryDelayMs:20});
+ await previewLoadGuard({projectId:${JSON.stringify(scenario)},hostOrigin:location.origin},()=>${scenario==='timeout'?'new Promise(()=>{})':scenario==='foreign'?"Promise.reject(new Error('APP_STORAGE_HOST_MISMATCH'))":`import('/entry.js?case=${scenario}')`},{timeoutMs:700,retryDelayMs:20});
  </script></body></html>`);
 });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const origin='http://127.0.0.1:'+server.address().port;
@@ -42,6 +42,7 @@ try{
  await page.getByText('数据仍在保存或需要核对，暂未刷新。原数据保留，请稍后重试。',{exact:true}).waitFor();assert.equal(counts.get('pending'),1);
  await page.goto(origin+'/?case=timeout');await page.getByRole('button',{name:'重新加载预览',exact:true}).waitFor();
  await page.waitForTimeout(1000);assert.equal(counts.get('timeout'),2);
+ await page.goto(origin+'/?case=foreign');await page.getByRole('button',{name:'从 Forge 打开预览',exact:true}).waitFor();await page.waitForTimeout(1000);assert.equal(counts.get('foreign'),1);
  await page.goto(origin+'/?case=normal');await page.getByText('App ready',{exact:true}).waitFor();await page.getByLabel('Value').fill('user is using app');
  await page.evaluate(()=>window.dispatchEvent(new ErrorEvent('error',{error:new Error('runtime problem after render')})));
  await page.getByRole('button',{name:'重新加载预览',exact:true}).waitFor();await page.waitForTimeout(1000);

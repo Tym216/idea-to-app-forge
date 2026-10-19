@@ -67,8 +67,15 @@ export async function previewBootstrap(options,modules) {
  // Local verifier/health runtime is isolated from real user business data.
  if(['127.0.0.1','localhost','[::1]'].includes(location.hostname)&&options.allowLocalValidation){await launch();return;}
  if(window.parent===window){location.replace(options.hostOrigin+'/preview/'+encodeURIComponent(options.projectId));return;}
- const parentOrigin=new URL(document.referrer||options.hostOrigin).origin;
- if(parentOrigin!==options.hostOrigin)throw Error('APP_STORAGE_HOST_MISMATCH');
+ // A proxy/interstitial navigation can change document.referrer without changing the parent.
+ // Only browser ancestor identity and the authenticated postMessage handshake establish trust.
+ const expectedOrigin=new URL(options.hostOrigin).origin;
+ const parentOrigin=location.ancestorOrigins?.[0];
+ window.__forgePreviewHost={expected:expectedOrigin,parent:parentOrigin||'pending authenticated handshake'};
+ if(expectedOrigin!==options.hostOrigin||(parentOrigin&&parentOrigin!==expectedOrigin))throw Error('APP_STORAGE_HOST_MISMATCH');
+ // Browsers without ancestorOrigins still cannot launch until the exact parent window/origin
+ // replies on the random channel below; referrer never grants or denies authority.
+
  const channel=crypto.randomUUID();
  let entries=Object.create(null),revision=0,session=null,seq=0,blocked=false;
  let pending=null,dirty=false,storageFailure=null;

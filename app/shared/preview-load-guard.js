@@ -36,9 +36,10 @@ export async function previewLoadGuard(options, start, { timeoutMs = 12000, retr
     clearTimeout(loadingTimer);clearTimeout(deadline);
     window.__forgePreviewLoadStatus = 'needs_attention';
     console.error('FORGE_PREVIEW_LOAD', String(error?.message || error).slice(0, 1000));
+    const hostMismatch=String(error?.message||error).startsWith('APP_STORAGE_HOST_MISMATCH');
     let attempted = true;
     try { attempted = sessionStorage.getItem(key) === '1'; } catch { /* No persistent attempt marker: never auto retry. */ }
-    if (!rendered && !interacted && !hasContent() && !attempted) {
+    if (!hostMismatch && !rendered && !interacted && !hasContent() && !attempted) {
       try {
         sessionStorage.setItem(key, '1'); // Persist before reload; persistent errors cannot create a refresh loop.
         if (prepareReload()) {
@@ -48,15 +49,16 @@ export async function previewLoadGuard(options, start, { timeoutMs = 12000, retr
         }
       } catch { /* Fall back to an explicit user action, preserving all app data. */ }
     }
-    const box=showPanel(rendered ? '应用运行时出现待处理问题。已保存的应用数据保留，可以尝试重新加载预览。' : '预览暂未正常显示。已保存的应用数据保留，可以尝试重新加载预览。');
-    const button=document.createElement('button');button.textContent='重新加载预览';button.type='button';
+    const box=showPanel(hostMismatch ? '预览宿主地址与项目配置不一致。请从 Forge 打开预览；原数据未被修改。' : rendered ? '应用运行时出现待处理问题。已保存的应用数据保留，可以尝试重新加载预览。' : '预览暂未正常显示。已保存的应用数据保留，可以尝试重新加载预览。');
+    const button=document.createElement('button');button.textContent=hostMismatch?'从 Forge 打开预览':'重新加载预览';button.type='button';
     button.style.cssText='margin-top:10px;padding:7px 14px;border:0;border-radius:6px;background:#2563eb;color:white;cursor:pointer';
     button.onclick=()=>{
+      if(hostMismatch){window.open(options.hostOrigin+'/preview/'+encodeURIComponent(options.projectId),'_blank','noopener,noreferrer');return;}
       if (!prepareReload()) { box.firstChild.textContent='数据仍在保存或需要核对，暂未刷新。原数据保留，请稍后重试。';return; }
       location.reload();
     };box.append(button);
     const details=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');
-    summary.textContent='加载诊断';pre.style.cssText='white-space:pre-wrap;max-height:140px;overflow:auto';pre.textContent=String(error?.message || error).slice(0,1000);
+    summary.textContent='加载诊断';pre.style.cssText='white-space:pre-wrap;max-height:140px;overflow:auto';pre.textContent=String(error?.message || error).slice(0,1000)+(hostMismatch?'\n'+JSON.stringify(window.__forgePreviewHost||{}):'');
     details.append(summary,pre);box.append(details);
   };
   for (const name of ['pointerdown','keydown','input']) window.addEventListener(name,()=>{interacted=true;},{capture:true,once:true});
