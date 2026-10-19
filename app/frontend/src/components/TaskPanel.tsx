@@ -29,7 +29,7 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
   const report = current?.steps?.findLast((s) => s.tool === 'verify_report')?.result as {kind?:string;validationMode?:string;base?:unknown;logicChecks?:LogicCheck;items?:VerifyIssue[]} | undefined;
   // Legacy reports omitted base/logic evidence; the already persisted logic_check is authoritative too.
   const logic = report?.logicChecks ?? current?.steps?.findLast(s=>s.tool==='logic_check')?.result as LogicCheck|undefined;
-  const mode=report?.validationMode ?? (current?.steps?.findLast(s=>s.tool==='verify_attempt')?.result as {mode?:string}|undefined)?.mode;
+  const mode=report?.validationMode ?? (current?.steps?.findLast(s=>s.tool==='verify_attempt')?.result as {mode?:string}|undefined)?.mode ?? (report?.items?.some(i=>i.reason?.includes('当前临时关闭浏览器验收')) ? 'http' : undefined);
   const logicFailed=logic?.status==='failed';
   const checksLabel=mode==='http' ? logic?'服务与逻辑检查':'服务检查':'浏览器验收';
   const issues = report?.items?.filter((item) => item.status !== 'verified') ?? [];
@@ -155,7 +155,9 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
       {(completedWithWarnings || (current.status==='failed'&&(issues.length>0||logicFailed))) && (
         <div role="status" className="rounded-[8px] border border-[var(--line)] p-3 space-y-2 text-[12px]">
           <p className="font-medium">{completedWithWarnings
-            ? '应用已生成并可以预览。自动验收发现非阻塞警告，你仍可以打开预览继续测试。'
+            ? mode==='http' ? '构建和 HTTP 服务检查已完成；页面渲染与功能交互尚未检查，请打开预览确认实际效果。'
+              : report?.kind==='inconclusive' ? '自动检查尚未获得完整结论；预览地址已保留，请确认实际效果。'
+              : '自动检查有非阻塞待核对项；预览地址已保留，可继续查看。'
             : logicFailed ? '代码逻辑检查发现待核对问题，代码和预览已保留。' : '自动检查尚未完成，代码和预览已保留；详细证据可在开发者诊断中查看。'}</p>
           {logic&&<p>代码逻辑检查：{logic.tests ?? '—'} 项中 {logic.passed ?? '—'} 项通过{logicFailed?`，${logic.failed ?? '部分'} 项待核对；需检查实现和测试样例。`:'。'}</p>}
           {mode==='http'&&<p>浏览器交互检查已关闭，A1 等功能项未执行；这些未执行项不会被标记为通过。</p>}

@@ -63,6 +63,7 @@ export function turnResponse(turn:ConversationTurn){
  }
  if(version){
   const title=shortIntent(turn.intent)||'这次修改';
+  if(version.verify_evidence?.result?.validationMode==='http')return '应用代码已生成，构建和 HTTP 检查已完成；页面渲染与功能交互尚未检查，请打开预览确认效果。';
   if(version.verify_evidence?.result?.validationMode==='health')return '修改已保存并更新版本：'+title+'。基础检查通过；未运行功能交互验收。';
   return (version.parent_checkpoint_id?'修改已完成：'+title+'。':'应用已做好，可以开始使用。')+(version.verify_evidence?.status==='passed'?'':'部分自动交互检查尚未确认，请在预览中继续测试。');
  }

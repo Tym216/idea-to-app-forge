@@ -8,13 +8,14 @@ function Details({task,version}:{task?:Task;version?:AppVersion}){
  const build=task.steps?.findLast(s=>s.tool==='build'&&s.event==='finished');
  const preview=task.steps?.findLast(s=>s.tool==='start_dev'&&s.event==='finished');
  const fast=version?.verify_evidence?.result?.validationMode==='health';
+ const httpOnly=version?.verify_evidence?.result?.validationMode==='http';
  return <details aria-label="执行详情" className="mt-2 text-xs text-[var(--text-2)]">
-  <summary className="cursor-pointer">{done?'✓ 完成':'执行详情'}{paths.length?' · 修改 '+paths.length+' 个文件':''}{done?fast?' · 基础检查通过':' · 检查已有结论':''}</summary>
+  <summary className="cursor-pointer">{done?'✓ 完成':'执行详情'}{paths.length?' · 修改 '+paths.length+' 个文件':''}{done?httpOnly?' · 服务检查完成，功能未验收':fast?' · 基础检查通过':' · 检查已有结论':''}</summary>
   <ul className="mt-2 space-y-1">
    {paths.map(p=><li key={p}>修改 {p}</li>)}
    {build&&<li>{build.ok?'构建检查通过':'构建检查未通过'}</li>}
    {preview&&<li>{preview.ok?'Preview 已更新':'Preview 尚未就绪'}</li>}
-   {version&&<li>{fast?'仅验证 HTTP、实际渲染与 runtime；未运行功能交互验收':version.verify_evidence?.status==='passed'?'功能检查通过':'部分自动功能检查尚未确认'}</li>}
+   {version&&<li>{httpOnly?'仅验证构建和 HTTP；页面渲染、runtime 与功能交互未检查':fast?'仅验证 HTTP、实际渲染与 runtime；未运行功能交互验收':version.verify_evidence?.status==='passed'?'功能检查通过':'部分自动功能检查尚未确认'}</li>}
   </ul>
  </details>;
 }
