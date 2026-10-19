@@ -4,8 +4,15 @@ import {requestPreviewOnce} from './workspaceState';
 /** A GET observes the saved public origin; it never resolves a new Daytona URL. */
 export async function probePreviewHealth(url:string):Promise<boolean|null> {
  try {
-  const response=await fetch(url,{method:'GET',credentials:'omit',cache:'no-store',signal:AbortSignal.timeout(6000)});
-  return response.ok;
+  // Daytona's browser warning can return 200 before contacting a stopped runtime.
+  // This documented header observes the actual upstream, not the warning interstitial.
+  const daytona=/\.(?:daytonaproxy\d*\.net|proxy\.daytona\.work)$/.test(new URL(url).hostname);
+  const response=await fetch(url,{method:'GET',credentials:'omit',cache:'no-store',signal:AbortSignal.timeout(6000),
+   ...(daytona?{headers:{'X-Daytona-Skip-Preview-Warning':'true'}}:{})});
+  if(!response.ok)return false;
+  // Defensive fallback for proxies that ignore the header. Do not call an interstitial healthy.
+  if(daytona){const body=await response.text();if(/<title>\s*Daytona Preview - Warning\s*<\/title>/i.test(body))return false;}
+  return true;
  } catch {return null;}
 }
 

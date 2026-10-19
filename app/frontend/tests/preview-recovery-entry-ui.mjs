@@ -2,6 +2,7 @@ import {createServer} from 'vite';
 import {chromium} from 'playwright';
 import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
+import {readFile} from 'node:fs/promises';
 const root=fileURLToPath(new URL('..',import.meta.url));
 const server=await createServer({configFile:false,envDir:false,root,server:{host:'127.0.0.1',port:0},optimizeDeps:{entries:['tests/workspace-entry-ui.html']},
  resolve:{alias:{'@':root+'/src'}},define:{
@@ -14,18 +15,22 @@ try{
  await server.listen();const origin='http://127.0.0.1:'+server.httpServer.address().port;
  browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.FORGE_TEST_CHROMIUM?{executablePath:process.env.FORGE_TEST_CHROMIUM}:{})});
  const page=await browser.newPage();await page.clock.install();
+ const appHTML=await readFile(new URL('./stable-app.html',import.meta.url),'utf8');
+ let warning=false;const healthHeaders=[];
  let healthy=false,job=null,requests=0,reads=0,unknownReads=0,unexpected=0,detailsFail=false;
- const project={id:'p',user_id:'u',name:'Stopped preview',sandbox_id:'same-sandbox',checkpoint_id:'v1',preview_url:origin+'/tests/stable-app.html',workspace_revision:12,workspace_hash:'unchanged',workspace_state:'confirmed',workspace_writer:null};
- const respond=(route,value,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(value)});
+ const project={id:'p',user_id:'u',name:'Stopped preview',sandbox_id:'same-sandbox',checkpoint_id:'v1',preview_url:'https://5173-offline-fixture.daytonaproxy01.net/',workspace_revision:12,workspace_hash:'unchanged',workspace_state:'confirmed',workspace_writer:null};
+ const respond=(route,value,status=200)=>route.fulfill({status,contentType:'application/json',headers:{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'X-Daytona-Skip-Preview-Warning'},body:JSON.stringify(value)});
  await page.route('**/*',async route=>{
   const request=route.request(),url=new URL(request.url());
-  if(url.origin===origin){
-   if(url.pathname==='/tests/stable-app.html'){
-    if(request.resourceType()==='fetch'){reads++;if(unknownReads>0){unknownReads--;return route.abort('failed');}}
-    if(!healthy)return respond(route,{code:'SANDBOX_NOT_RUNNING'},400);
-   }
-   return route.continue();
+  if(url.hostname==='5173-offline-fixture.daytonaproxy01.net'){
+   if(request.method()==='OPTIONS')return route.fulfill({status:204,headers:{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,OPTIONS','Access-Control-Allow-Headers':'X-Daytona-Skip-Preview-Warning'}});
+   const isHealth=request.resourceType()==='fetch';
+   if(isHealth){reads++;healthHeaders.push(request.headers()['x-daytona-skip-preview-warning']);if(unknownReads>0){unknownReads--;return route.abort('failed');}}
+   if(warning||(isHealth&&request.headers()['x-daytona-skip-preview-warning']!=='true'))return route.fulfill({status:200,contentType:'text/html',headers:{'Access-Control-Allow-Origin':'*'},body:'<html><head><title>Daytona Preview - Warning</title></head><body>Preview URL Warning</body></html>'});
+   if(!healthy)return respond(route,{code:'SANDBOX_NOT_RUNNING'},400);
+   return route.fulfill({status:200,contentType:'text/html',headers:{'Access-Control-Allow-Origin':'*'},body:appHTML});
   }
+  if(url.origin===origin)return route.continue();
   if(url.hostname!=='abcdefghijklmnopqrst.supabase.co'){unexpected++;return route.abort();}
   if(url.pathname==='/rest/v1/rpc/ita_request_preview_recovery'&&request.method()==='POST'){
    requests++;job={project_id:'p',sandbox_id:'same-sandbox',status:'queued'};return respond(route,job);
@@ -64,9 +69,13 @@ try{
  await page.waitForFunction(()=>document.querySelector('iframe')!==null);
  await page.waitForTimeout(100);assert.ok(reads>priorReads,'Mounted preview has a bounded periodic liveness check');
  assert.equal(requests,3,'Healthy periodic checks do not enqueue recovery');
+ assert.ok(healthHeaders.length>0&&healthHeaders.every(value=>value==='true'),'Health checks must bypass Daytona browser interstitials');
+ warning=true;await page.reload();
+ await page.getByText('正在启动预览…',{exact:true}).waitFor();assert.equal(requests,4,'Even an ignored skip header must not make a 200 interstitial healthy');
+ warning=false;job={...job,status:'ready'};await frame.getByText('preserved',{exact:true}).waitFor();
  healthy=false;job=null;detailsFail=true;await page.reload();
- for(let i=0;i<60&&requests<4;i++)await page.waitForTimeout(250);
- assert.equal(requests,4,'Unrelated editor/chat reads must not prevent checkpoint preview recovery');
+ for(let i=0;i<60&&requests<5;i++)await page.waitForTimeout(250);
+ assert.equal(requests,5,'Unrelated editor/chat reads must not prevent checkpoint preview recovery');
  assert.equal(unexpected,0);
  console.log('PASS actual Workspace stopped-runtime auto recovery, pending dedup, same-URL completion, healthy re-entry/data, later-stop focus recheck, bounded unknown-read recovery and periodic read-only liveness; zero remote operations');
 }finally{await browser?.close();await server.close();}

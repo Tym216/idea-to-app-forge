@@ -1,3 +1,4 @@
+import {useAccountPreviewWarmup} from '@/hooks/useAccountPreviewWarmup';
 import { Toaster } from '@/components/ui/sonner';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -13,7 +14,9 @@ import UiMock from './pages/UiMock';
 
 const queryClient = new QueryClient();
 
-const AppRoutes = () => (
+const AppRoutes = () => {
+  useAccountPreviewWarmup();
+  return (
   <Routes>
     <Route path="/" element={<Index />} />
     <Route path="/workspace/:projectId" element={<Workspace />} />
@@ -25,6 +28,7 @@ const AppRoutes = () => (
     {/* MODULE_ROUTES_END */}
   </Routes>
 );
+};
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
