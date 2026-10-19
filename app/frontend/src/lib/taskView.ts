@@ -21,6 +21,18 @@ export function parseTaskError(error: string | null): ParsedError | null {
   return { code: 'ERROR', reason: error.split('\n')[0].slice(0, 160), next: '查看原始错误后重试', lastTool: null, raw: error };
 }
 
+/** Technical terminal status remains intact; customer copy does not expose the internal failure label. */
+export function hasQuickRepair(task: Task): boolean {
+  return (task.steps || []).some(s => s.tool === 'verification_repair' && s.event === 'started');
+}
+export function isVerificationStop(task: Task): boolean {
+  return task.status === 'failed' && (parseTaskError(task.error)?.code.startsWith('VERIFY_') === true || hasQuickRepair(task));
+}
+export function quickRepairActive(task: Task): boolean {
+  return task.status === 'running' && hasQuickRepair(task)
+    && !task.steps.some(s => s.tool === 'verification_repair' && s.event === 'finished');
+}
+
 export function viewState(task: Task | null): ViewState {
   if (!task) return 'empty';
   if (task.status === 'queued') return 'waiting';
@@ -36,7 +48,7 @@ export const STATE_LABEL: Record<ViewState, string> = {
   waiting: '排队等待',
   running: '执行中',
   paused: '已暂停',
-  failed: '失败',
+  failed: '需要处理',
   success: '已完成',
   review: '等待你审阅计划',
 };
@@ -59,18 +71,19 @@ const PHASE_TEXT: Record<string, string> = {
   sandbox: '准备运行环境',
   react: '正在准备生成应用',
   verify: '正在检查应用',
+  quick_repair: '正在快速完善应用',
   list_files: '读取现有代码',
   read_file: '读取现有代码',
   write_file: '修改代码',
   delete_file: '修改代码',
   run_command: '执行命令',
   build: '安装依赖并构建',
-  fixing: '构建失败,正在修复',
+  fixing: '正在修正构建问题',
   start_dev: '启动应用',
   finishing: '预览已就绪',
   done: '已完成',
   done_with_warnings: '带警告完成',
-  error: '已失败',
+  error: '等待进一步处理',
   cancelled: '已取消',
 };
 
@@ -103,6 +116,7 @@ export function activityText(step: TaskStep): string {
 }
 
 export function currentActivity(task: Task): string {
+  if (quickRepairActive(task)) return '正在快速完善应用（有时间和调用上限）';
   const last = task.steps?.at(-1);
   if (task.status === 'running' && last?.event === 'started') return activityText(last);
   return phaseText(task.phase);

@@ -18,7 +18,10 @@ const rootTask={...tasks[0],id:'plan',mode:'plan',plan_id:'initial',prompt:'Buil
 const buildTask={...tasks[0],id:'build',plan_id:'initial'} as Task;
 const firstRequest={...messages[0],task_id:null,content:'Build Todo'};
 const initial=conversationTurns([firstRequest],[buildTask,rootTask],[],[{id:'initial',source_task_id:'plan'} as never]);
-const projectionProof={turns:persisted.length,oneTaskAssistant:persisted.filter(t=>t.tasks.some(x=>x.id==='t2')).length,
+const pendingRepair={...tasks[0],operation:'agent',status:'running',steps:[{tool:'verification_repair',event:'started'}]} as Task;
+const stoppedRepair={...pendingRepair,status:'failed',error:JSON.stringify({code:'VERIFY_FAILED',reason:'验收失败',raw:'INTERNAL'})} as Task;
+const repairCopy=turnResponse({id:'repair',tasks:[stoppedRepair],messages:[],versions:[],intent:''});
+const projectionProof={repairFriendly:!repairCopy.includes('失败')&&repairCopy.includes('待处理'),repairProgress:turnResponse({id:'repair',tasks:[pendingRepair],messages:[],versions:[],intent:''}).includes('快速修正'),turns:persisted.length,oneTaskAssistant:persisted.filter(t=>t.tasks.some(x=>x.id==='t2')).length,
  stableTurnId:running[0].id===checking[0].id,progressChanged:turnResponse(running[0])!==turnResponse(checking[0]),
  noRaw:!turnResponse(persisted[0]).includes('WORKSPACE'),intentTitle:versionTitle(versions[0],persisted[0].intent),initialOneTurn:initial.length===1&&initial[0].tasks.length===2};
 function Demo(){

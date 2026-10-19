@@ -63,9 +63,10 @@ try {
  assert.deepEqual(restored.value,['retained']);
  await page.getByRole('button',{name:'Show logic failure',exact:true}).click();
  const failed=page.getByTestId('recovery-probe');
- await failed.getByText(/代码逻辑检查：10 项中 8 项通过，2 项失败/).waitFor();
- assert.ok((await failed.innerText()).includes('这本身不会导致任务失败'));
- assert.ok(!(await failed.innerText()).includes('本轮失败:浏览器验收未通过'));
+ await failed.getByText(/代码逻辑检查：10 项中 8 项通过，2 项待核对/).waitFor();
+ assert.ok((await failed.innerText()).includes('这些未执行项不会被标记为通过'));
+ assert.ok(!(await failed.innerText()).includes('失败'));
+  assert.ok((await failed.innerText()).includes('有待完善项'));
  assert.ok(!(await failed.innerText()).includes('TEST_ASSERT'));
  assert.equal(await failed.getByRole('button',{name:'核对并继续修复',exact:true}).count(),1);
  await failed.getByText('开发者诊断 · 服务与逻辑检查',{exact:true}).click();

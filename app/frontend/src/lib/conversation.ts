@@ -1,3 +1,4 @@
+import { hasQuickRepair, isVerificationStop, quickRepairActive } from './taskView';
 import type {AppVersion,Message,Plan,Task} from './supabase';
 const technical=/locator\.|bodyText|Traceback|WORKSPACE_|(?:Error:|\bat .*file:\/\/)|^\s*[{[]/;
 export const shortIntent=(s?:string)=>{const line=(s||'').split('\n')[0].trim();return !line||technical.test(line)||/^(?:修改|新增|删除)\s+(?:src\/|package\.|index\.html)/.test(line)?'':line.slice(0,72);};
@@ -41,6 +42,9 @@ export function conversationTurns(messages:Message[],tasks:Task[],versions:AppVe
 }
 export function turnResponse(turn:ConversationTurn){
  const task=turn.tasks[0],version=turn.versions.at(-1);
+ if(task && isVerificationStop(task)) return hasQuickRepair(task)
+  ? '本轮快速完善已结束，仍有待处理项。已保存代码和预览地址，你可以先查看预览，或提出具体修改继续完善。'
+  : '自动检查有待确认项，已保存代码和预览地址。你可以查看预览，或继续完善；未确认的功能不会标为通过。';
  if(task?.status==='failed'){
   let reason='这次操作未完成；项目与已保存的代码保留，可以重试。';
   try{const error=JSON.parse(task.error||'{}');if(error.code==='LLM_PROVIDER_BUSY'||/429/.test(error.reason||''))reason=task.mode==='plan'?'模型服务暂时繁忙，这次没有产生代码修改。你可以重试。':'模型服务暂时繁忙，已保存代码与进度，可以重试。';
@@ -51,6 +55,7 @@ export function turnResponse(turn:ConversationTurn){
  if(task?.status==='paused')return '已暂停，代码和进度已保留。';
  if(task?.status==='cancelled')return '本次任务已结束，已保存的项目与代码保留。';
  if(task&&['queued','running'].includes(task.status)){
+  if(quickRepairActive(task))return '发现待完善项，正在尝试一次快速修正；到达时间或调用上限就停止。';
   if(task.steps?.at(-1)?.event==='retrying')return '模型服务繁忙，正在重试…';
   if(['build','start_dev','verify'].includes(task.phase))return '正在检查修改…';
   if(task.phase==='edit'||task.phase==='write_file')return '正在修改应用…';
