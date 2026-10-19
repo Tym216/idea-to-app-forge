@@ -25,13 +25,21 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
   const stages = stagesOf(current);
   const err = current?.status === 'failed' ? parseTaskError(current.error) : null;
   type VerifyIssue = { id: string; status: string; reason?: string; stepResults?: Array<{ index: number; op: string; ok: boolean; expected?: unknown; actual?: unknown; observed?: unknown }> };
-  const report = current?.steps?.findLast((s) => s.tool === 'verify_report')?.result as { kind?: string; items?: VerifyIssue[] } | undefined;
+  type LogicCheck = {status:string;tests?:number;passed?:number;failed?:number;details?:string};
+  const report = current?.steps?.findLast((s) => s.tool === 'verify_report')?.result as {kind?:string;validationMode?:string;base?:unknown;logicChecks?:LogicCheck;items?:VerifyIssue[]} | undefined;
+  // Legacy reports omitted base/logic evidence; the already persisted logic_check is authoritative too.
+  const logic = report?.logicChecks ?? current?.steps?.findLast(s=>s.tool==='logic_check')?.result as LogicCheck|undefined;
+  const mode=report?.validationMode ?? (current?.steps?.findLast(s=>s.tool==='verify_attempt')?.result as {mode?:string}|undefined)?.mode;
+  const logicFailed=logic?.status==='failed';
+  const checksLabel=mode==='http' ? logic?'服务与逻辑检查':'服务检查':'浏览器验收';
   const issues = report?.items?.filter((item) => item.status !== 'verified') ?? [];
   const completedWithWarnings = current?.status === 'succeeded' && current.phase === 'done_with_warnings';
   const recentActivity = current?.steps?.filter((s) => s.event !== 'started').slice(-4) ?? [];
   const verifyCount = current ? verificationAttempts(current) : 0;
   const verifyLimitReached = verifyCount >= 2;
   const verifyFailure = !!err?.code.startsWith('VERIFY_');
+  const failureReason=verifyFailure&&logicFailed ? `代码逻辑检查有 ${logic.failed ?? '部分'} 项断言失败，需核对实现或测试样例` : err?.reason;
+  const failureNext=verifyFailure&&logicFailed ? '预览已保留。先核对失败样例与业务规则，再修复并检查；不要直接重复验收或删掉失败测试。' : err?.next;
   const control = async (action: typeof pauseTask) => {
     if (!current || pending) return;
     setPending(true);
@@ -92,7 +100,7 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
             <dd>{fmtTime(current.started_at ?? current.created_at)}</dd>
             <dt>更新</dt>
             <dd>{fmtTime(current.updated_at)}</dd>
-            {verifyCount > 0 && <><dt>浏览器验收</dt><dd>已执行 {verifyCount} 次 · 每任务最多 2 次</dd></>}
+            {verifyCount > 0 && <><dt>{checksLabel}</dt><dd>已执行 {verifyCount} 次 · 每任务最多 2 次</dd></>}
           </dl>
         </div>
       </div>
@@ -143,15 +151,17 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
         </ol>
       )}
 
-      {(completedWithWarnings || (current.status==='failed'&&issues.length>0)) && (
+      {(completedWithWarnings || (current.status==='failed'&&(issues.length>0||logicFailed))) && (
         <div role="status" className="rounded-[8px] border border-[var(--line)] p-3 space-y-2 text-[12px]">
           <p className="font-medium">{completedWithWarnings
             ? '应用已生成并可以预览。自动验收发现非阻塞警告，你仍可以打开预览继续测试。'
-            : '自动验收未完成，代码和预览已保留；详细证据可在开发者诊断中查看。'}</p>
+            : logicFailed ? '代码逻辑检查发现待核对问题，代码和预览已保留。' : '自动检查尚未完成，代码和预览已保留；详细证据可在开发者诊断中查看。'}</p>
+          {logic&&<p>代码逻辑检查：{logic.tests ?? '—'} 项中 {logic.passed ?? '—'} 项通过{logicFailed?`，${logic.failed ?? '部分'} 项失败；需核对实现和测试样例。`:'。'}</p>}
+          {mode==='http'&&<p>浏览器交互检查已关闭，A1 等功能项未执行；这本身不会导致任务失败。</p>}
           <p className="text-[var(--text-2)]">未验证项没有被标记为通过。</p>
           <details>
-            <summary className="cursor-pointer text-[var(--text-2)]">开发者诊断 · 浏览器验收</summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(issues,null,2)}</pre>
+            <summary className="cursor-pointer text-[var(--text-2)]">开发者诊断 · {checksLabel}</summary>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify({...report,validationMode:mode,logicChecks:logic,items:issues},null,2)}</pre>
           </details>
         </div>
       )}
@@ -159,7 +169,7 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
       {err && (
         <div role="alert" className="rounded-[8px] border border-[var(--danger)] p-3 space-y-2">
           <p className="text-[13px] font-medium text-[var(--danger)] flex items-center gap-1">
-            <AlertTriangle className="h-3.5 w-3.5" aria-hidden /> 本轮失败:{err.reason}
+            <AlertTriangle className="h-3.5 w-3.5" aria-hidden /> 本轮失败:{failureReason}
           </p>
           {current.last_tool && !err.code.startsWith('LLM_') && (
             <p className="text-[12px] text-[var(--text-2)]">
@@ -167,10 +177,10 @@ export function TaskPanel({ current, history, onChanged, retry: retryFn = retryT
               {current.last_tool_ms != null ? `(${Math.round(current.last_tool_ms / 1000)} 秒)` : ''}
             </p>
           )}
-          {err.next && <p className="text-[12px]">下一步:{err.next}</p>}
+          {failureNext && <p className="text-[12px]">下一步:{failureNext}</p>}
           <div className="flex flex-wrap gap-2">
             {!verifyLimitReached && <button type="button" disabled={pending} onClick={() => retry('resume')} className="btn-ghost h-8 px-3 rounded-[6px] text-[12px] inline-flex items-center gap-1">
-              <Play className="h-3.5 w-3.5" aria-hidden /> {verifyFailure ? '手动重试一次' : '恢复任务'}
+              <Play className="h-3.5 w-3.5" aria-hidden /> {verifyFailure&&logicFailed&&current.operation!=='user_apply' ? '核对并继续修复' : verifyFailure ? '手动重试一次' : '恢复任务'}
             </button>}
             <button type="button" disabled={pending || current.operation==='user_apply'} onClick={() => retry('new')} className="btn-ghost h-8 px-3 rounded-[6px] text-[12px] inline-flex items-center gap-1">
               <RotateCcw className="h-3.5 w-3.5" aria-hidden /> 新建任务重试

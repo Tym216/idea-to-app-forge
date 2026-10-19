@@ -10,15 +10,21 @@ const file={id:'f',project_id:'p',path:'src/App.tsx',content:'original',updated_
 const version={id:'v1',project_id:'p',version_number:1,parent_checkpoint_id:null,label:'Initial',workspace_revision:1,code_hash:'hash',basis_id:'b',created_at:'now',verify_evidence:{status:'inconclusive'},files:[{path:file.path,content:'historical'}]} as AppVersion;
 const project={id:'p',sandbox_id:'s',checkpoint_id:'v1',workspace_revision:1,workspace_hash:'hash',workspace_state:'confirmed'} as Project;
 function RecoveryProbe() {
+ const [failure,setFailure]=useState(false);
  const attempted=useRef(new Set<string>());const [poll,setPoll]=useState(0);const [requests,setRequests]=useState(0);
  useEffect(()=>{requestPreviewOnce(previewRecoveryKey(project,[],true),attempted.current,async()=>{setRequests(n=>n+1);});},[poll]);
  const task={id:'warn',mode:'build',status:'succeeded',phase:'done_with_warnings',steps:[{tool:'verify_report',at:'2026-10-13T00:00:00Z',observation:'验收报告已保存',
  result:{kind:'success_with_warnings',items:[{id:'A1',status:'warning',reason:'locator.click: Timeout',
  stepResults:[{observed:{bodyText:'INTERNAL_BODY_DUMP'}}]}]}}]} as unknown as Task;
- return <section data-testid="recovery-probe">
+ const displayed=failure?{...task,status:'failed',phase:'error',error:JSON.stringify({code:'VERIFY_FAILED',reason:'浏览器验收未通过',next:'old generic retry'}),steps:[
+ {tool:'verify_attempt',at:'now',observation:'HTTP check',event:'started',result:{mode:'http'}},
+ {tool:'logic_check',at:'now',observation:'Logic evidence saved',result:{status:'failed',tests:10,passed:8,failed:2,details:'TEST_ASSERT expected: true actual: false'}},
+ {tool:'verify_report',at:'now',observation:'Report saved',result:{kind:'blocker',items:[{id:'A1',status:'inconclusive',reason:'浏览器交互未执行'}]}}
+ ]} as unknown as Task:task;
+ return <section data-testid="recovery-probe"><button onClick={()=>setFailure(true)}>Show logic failure</button>
  <button onClick={()=>setPoll(n=>n+1)}>Poll preview</button><output data-testid="recovery-requests">{requests}</output>
  <PreviewPane url={null} recovery={{status:'queued'} as never} recoveryError="fetch failed"/>
- <TaskPanel current={task} history={[]} onChanged={()=>{}}/>
+ <TaskPanel current={displayed} history={[]} onChanged={()=>{}}/>
  </section>;
 }
 function Demo() {

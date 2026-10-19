@@ -60,6 +60,17 @@ try {
  await page.evaluate(async source=>{const m=await import('data:text/javascript;base64,'+btoa(source));m.createAppState('todos',{initialValue:[]}).write(['retained']);},helper);
  await page.reload();
  const restored=await page.evaluate(async source=>{const m=await import('data:text/javascript;base64,'+btoa(source));return m.createAppState('todos',{initialValue:[]}).read();},helper);
- assert.deepEqual(restored.value,['retained']);assert.equal(external,0);
+ assert.deepEqual(restored.value,['retained']);
+ await page.getByRole('button',{name:'Show logic failure',exact:true}).click();
+ const failed=page.getByTestId('recovery-probe');
+ await failed.getByText(/代码逻辑检查：10 项中 8 项通过，2 项失败/).waitFor();
+ assert.ok((await failed.innerText()).includes('这本身不会导致任务失败'));
+ assert.ok(!(await failed.innerText()).includes('本轮失败:浏览器验收未通过'));
+ assert.ok(!(await failed.innerText()).includes('TEST_ASSERT'));
+ assert.equal(await failed.getByRole('button',{name:'核对并继续修复',exact:true}).count(),1);
+ await failed.getByText('开发者诊断 · 服务与逻辑检查',{exact:true}).click();
+ assert.ok((await failed.innerText()).includes('TEST_ASSERT expected: true actual: false'));
+ assert.ok((await failed.innerText()).includes('浏览器交互未执行'));
+ assert.equal(external,0);
  console.log('PASS local Chromium UI: draft/no remote writes, active disabled, no-op terminal/no phantom task, accepted/applying/completed, stale, version readonly, stable-vs-working/old iframe, browser reload persistence; no external requests');
 } finally {await browser?.close();await server.close();}
