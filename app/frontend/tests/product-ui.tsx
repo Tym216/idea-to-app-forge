@@ -1,3 +1,4 @@
+import { activityText } from '../src/lib/taskView';
 import {conversationTurns,turnResponse,versionTitle} from '../src/lib/conversation';
 import '../src/index.css';
 import React,{useState} from 'react';import {createRoot} from 'react-dom/client';
@@ -21,7 +22,7 @@ const initial=conversationTurns([firstRequest],[buildTask,rootTask],[],[{id:'ini
 const pendingRepair={...tasks[0],operation:'agent',status:'running',steps:[{tool:'verification_repair',event:'started'}]} as Task;
 const stoppedRepair={...pendingRepair,status:'failed',error:JSON.stringify({code:'VERIFY_FAILED',reason:'验收失败',raw:'INTERNAL'})} as Task;
 const repairCopy=turnResponse({id:'repair',tasks:[stoppedRepair],messages:[],versions:[],intent:''});
-const projectionProof={repairFriendly:!repairCopy.includes('失败')&&repairCopy.includes('待处理'),repairProgress:turnResponse({id:'repair',tasks:[pendingRepair],messages:[],versions:[],intent:''}).includes('快速修正'),turns:persisted.length,oneTaskAssistant:persisted.filter(t=>t.tasks.some(x=>x.id==='t2')).length,
+const projectionProof={activityFriendly:!activityText({tool:'verify',event:'finished',ok:false} as never).includes('失败'),repairFriendly:!repairCopy.includes('失败')&&repairCopy.includes('待处理'),repairProgress:turnResponse({id:'repair',tasks:[pendingRepair],messages:[],versions:[],intent:''}).includes('快速修正'),turns:persisted.length,oneTaskAssistant:persisted.filter(t=>t.tasks.some(x=>x.id==='t2')).length,
  stableTurnId:running[0].id===checking[0].id,progressChanged:turnResponse(running[0])!==turnResponse(checking[0]),
  noRaw:!turnResponse(persisted[0]).includes('WORKSPACE'),intentTitle:versionTitle(versions[0],persisted[0].intent),initialOneTurn:initial.length===1&&initial[0].tasks.length===2};
 function Demo(){

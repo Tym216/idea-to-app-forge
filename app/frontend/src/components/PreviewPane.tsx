@@ -10,7 +10,7 @@ const EMPTY_TEXT: Record<ViewState, { icon: typeof Monitor; title: string; body:
   empty: { icon: Monitor, title: '还没有预览', body: '选择 Build 提交需求,或批准计划后,应用在沙箱中构建并启动后会显示在这里。' },
   waiting: { icon: Clock, title: '排队等待中', body: '任务已提交,等待 Worker 领取。关闭页面不影响执行。' },
   running: { icon: Loader2, title: '正在构建', body: '启动成功后这里会加载真实运行的应用。进度见左侧。' },
-  failed: { icon: AlertTriangle, title: '本轮未产出预览', body: '查看左侧失败原因,选择恢复任务或新建任务。' },
+  failed: { icon: AlertTriangle, title: '本轮未产出预览', body: '查看左侧处理建议，选择继续完善或开始新任务。' },
   success: { icon: CheckCircle2, title: '任务已完成但没有预览地址', body: '可能是 Plan 任务或沙箱已回收;再次 Build 会重新启动。' },
   review: { icon: Clock, title: '等待你审阅计划', body: '在「计划」页批准后才会开始构建。' },
 };

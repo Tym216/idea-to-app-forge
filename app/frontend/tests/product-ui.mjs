@@ -17,7 +17,7 @@ let browser;try{
  const conversation=page.getByLabel('项目对话');
  await conversation.getByText('把背景改成蓝色',{exact:true}).waitFor();
  const proof=JSON.parse(await page.getByTestId('projection-proof').textContent());
- assert.ok(proof.repairFriendly&&proof.repairProgress);assert.equal(proof.oneTaskAssistant,1);assert.ok(proof.stableTurnId&&proof.progressChanged&&proof.noRaw&&proof.initialOneTurn);assert.equal(proof.intentTitle,'把背景改成蓝色');
+ assert.ok(proof.repairFriendly&&proof.repairProgress&&proof.activityFriendly);assert.equal(proof.oneTaskAssistant,1);assert.ok(proof.stableTurnId&&proof.progressChanged&&proof.noRaw&&proof.initialOneTurn);assert.equal(proof.intentTitle,'把背景改成蓝色');
  assert.equal(await page.locator('[data-forge-turn]').count(),2);
  assert.equal(await page.locator('details[aria-label=执行详情][open]').count(),0);
 await conversation.getByText('把背景改成蓝色',{exact:true}).waitFor();

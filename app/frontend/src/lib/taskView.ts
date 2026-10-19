@@ -107,11 +107,12 @@ const TOOL_ACTIVITY: Record<string, [string, string]> = {
 };
 
 export function activityText(step: TaskStep): string {
-  if (['llm', 'llm_parse_error', 'verify_attempt', 'pause', 'resume', 'cancel'].includes(step.tool)) return step.observation;
+  if (['llm', 'llm_parse_error', 'pause', 'resume', 'cancel'].includes(step.tool)) return step.observation;
+  if (step.tool === 'verify_attempt') return '正在执行固定检查';
   if (step.phase === 'awaiting_review') return step.observation || '计划已完成，请审阅';
   const [doing, done] = TOOL_ACTIVITY[step.tool] || ['正在执行操作', '操作已完成'];
   if (step.event === 'started') return step.path ? `${doing} ${step.path}` : doing;
-  if (step.ok === false) return step.path ? `${step.path} 操作失败` : `${doing.replace('正在', '')}失败`;
+  if (step.ok === false) return step.tool === 'verify' ? '检查发现待完善项' : step.path ? `${step.path} 需要进一步处理` : `${doing.replace('正在', '')}需要进一步处理`;
   return step.path ? `${done} ${step.path}` : done;
 }
 
