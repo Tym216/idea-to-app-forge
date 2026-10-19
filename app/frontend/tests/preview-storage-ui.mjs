@@ -1,3 +1,4 @@
+import {previewLoadGuard} from '../../shared/preview-load-guard.js';
 
 import {createServer} from 'vite';
 import {createServer as httpServer} from 'node:http';
@@ -44,7 +45,7 @@ try{
  for(let i=0;i<2;i++){
   const previous=process.cwd();let server;
   try{process.chdir(root);server=await createServer({root,configFile:i===1?path.join(root,'.forge-preview/vite.config.mjs'):false,envDir:false,optimizeDeps:{noDiscovery:true},
-   server:{host:'127.0.0.1',port:0},...(i===0?{plugins:[createPreviewPlugin({hostOrigin,projectId:'project-a',allowLocalValidation:false},previewBootstrap.toString())]}:{})});
+   server:{host:'127.0.0.1',port:0},...(i===0?{plugins:[createPreviewPlugin({hostOrigin,projectId:'project-a',allowLocalValidation:false},previewBootstrap.toString(),previewLoadGuard.toString())]}:{})});
   }finally{process.chdir(previous);}
   await server.listen();children.push(server);
  }
@@ -72,11 +73,18 @@ try{
  await page.locator('#status').filter({hasText:'error'}).waitFor();
  assert.equal(await page.evaluate(k=>localStorage.getItem(k),storeKey),'{malformed');
  assert.equal(await page.frames()[1].evaluate(()=>window.appLaunched||false),false);
+ assert.equal(await page.frames()[1].evaluate(()=>window.__forgeStoragePrepareReload()),false);
  await page.evaluate(async k=>{
  const {resetPreviewStorage}=await import('/bridge.js');
  await resetPreviewStorage({environment:'demo',ref:'demo',userId:'user-a',projectId:'project-a'});
  },storeKey);
  await page.reload();await page.frames()[1].waitForFunction(()=>window.appLaunched===true);assert.equal(await frame().locator('#list').textContent(),'');
+ const refused=await page.frames()[1].evaluate(()=>{localStorage.setItem('guard-test','saved-before-reload');return window.__forgeStoragePrepareReload();});assert.equal(refused,false);
+ await page.locator('#status').filter({hasText:'saved'}).waitFor();
+ await page.frames()[1].waitForFunction(()=>window.__forgeStorageStatus.status==='saved');
+ assert.equal(await page.frames()[1].evaluate(()=>window.__forgeStoragePrepareReload()),true);
+ assert.equal(await page.frames()[1].evaluate(()=>{try{localStorage.setItem('guard-test','late-write');return false;}catch{return true;}}),true);
+ assert.equal(JSON.parse(await page.evaluate(k=>localStorage.getItem(k),storeKey)).entries['guard-test'],'saved-before-reload');
  assert.equal(remote,0);
  console.log('PASS cross-origin platform persistence: real Vite bootstrap before App, raw localStorage survives origin change/refresh/account re-entry, project+account isolation, foreign-message rejection, stale CAS and corrupt-data fail closed, zero remote calls');
 }finally{

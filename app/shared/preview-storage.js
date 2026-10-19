@@ -71,9 +71,15 @@ export async function previewBootstrap(options,modules) {
  if(parentOrigin!==options.hostOrigin)throw Error('APP_STORAGE_HOST_MISMATCH');
  const channel=crypto.randomUUID();
  let entries=Object.create(null),revision=0,session=null,seq=0,blocked=false;
- let pending=null,dirty=false;
+ let pending=null,dirty=false,storageFailure=null;
+ window.__forgePreviewPhase='hydrating';
+ // Freeze writes before acknowledging an automatic navigation. Pending/unconfirmed saves never permit it.
+ window.__forgeStoragePrepareReload=()=>{
+  if(pending||dirty||(blocked&&storageFailure!=='未连接 Forge 状态存储'))return false;
+  blocked=true;return true;
+ };
  const fail=(message)=>{
-  blocked=true;window.__forgeStorageStatus={status:'blocked',error:message};
+  storageFailure=message;blocked=true;window.__forgeStorageStatus={status:'blocked',error:message};
   const panel=document.createElement('div');panel.setAttribute('role','alert');
   panel.style.cssText='position:fixed;bottom:12px;left:12px;right:12px;z-index:2147483647;padding:12px;background:#fff1f2;color:#9f1239;border:1px solid #fecdd3;border-radius:8px';
   panel.textContent='应用数据未能安全保存：'+message+'。原数据保留，请重新打开预览。';
@@ -122,5 +128,7 @@ export async function previewBootstrap(options,modules) {
  Object.defineProperty(window,'localStorage',{get:()=>virtual,configurable:false});
  window.__forgeStorageFlush=()=>flush();
  window.addEventListener('beforeunload',event=>{if(pending||dirty){event.preventDefault();event.returnValue='';}});
+ window.__forgePreviewPhase='app-starting';
  await launch();
+ window.__forgePreviewPhase='app-loaded';
 }

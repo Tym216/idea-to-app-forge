@@ -1,3 +1,4 @@
+import {previewLoadGuard} from '../../shared/preview-load-guard.js';
 
 import test from 'node:test';import assert from 'node:assert/strict';
 import {createPreviewPlugin,platformDevCommand,previewHostOrigin,renderPreviewConfig,PREVIEW_RUNTIME_FINGERPRINT} from '../src/preview-platform.js';
@@ -12,9 +13,10 @@ test('platform preview wraps supported Vite command without modifying managed so
  assert.match(renderPreviewConfig({environmentId:'atoms-demo'},{projectId:'p'}),/loadConfigFromFile/);
 });
 test('runtime defers all modules and rejects classic execution before storage hydration',()=>{
- const plugin=createPreviewPlugin({hostOrigin:'https://forge.test',projectId:'p'},previewBootstrap.toString());
+ assert.throws(()=>createPreviewPlugin({},previewBootstrap.toString()),/LOAD_GUARD_REQUIRED/);
+ const plugin=createPreviewPlugin({hostOrigin:'https://forge.test',projectId:'p'},previewBootstrap.toString(),previewLoadGuard.toString());
  const html=plugin.transformIndexHtml.handler('<html><head></head><body><script type="module" src="/src/main.tsx"></script></body></html>');
- assert.match(html,/application\/forge-deferred-module/);assert.match(html,/await boot/);
+ assert.match(html,/application\/forge-deferred-module/);assert.match(html,/await boot/);assert.match(html,/PREVIEW_LOAD_TIMEOUT/);
  assert.throws(()=>plugin.transformIndexHtml.handler('<head></head><script>unsafe()</script>'),/UNSUPPORTED/);
  assert.throws(()=>plugin.transformIndexHtml.handler('<head></head><script type="module">const x="</script><script>bad</script>";</script>'),/UNSUPPORTED/);
 });

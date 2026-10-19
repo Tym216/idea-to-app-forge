@@ -1,9 +1,11 @@
 
 import {createHash} from 'node:crypto';
+import {previewLoadGuard} from '../../shared/preview-load-guard.js';
 import {previewBootstrap} from '../../shared/preview-storage.js';
 /** Vite-only runtime adapter; generated managed source and immutable versions stay unchanged. */
 export const PREVIEW_RUNTIME_VERSION='forge-preview-storage-v1';
-export function createPreviewPlugin(options,bootstrapSource) {
+export function createPreviewPlugin(options,bootstrapSource,loadGuardSource) {
+ if(typeof loadGuardSource!=='string'||!loadGuardSource.trim())throw Error('FORGE_PREVIEW_LOAD_GUARD_REQUIRED');
  const inline=new Map();
  return {
   name:'forge-platform-storage',
@@ -24,7 +26,7 @@ export function createPreviewPlugin(options,bootstrapSource) {
    });
    const payload=JSON.stringify({options,modules}).replaceAll('<','\\u003c');
    return html.replace(/<head\b[^>]*>/i,tag=>tag+
-    '<script type="module">import {boot} from "/__forge__/platform.js";const p='+payload+';await boot(p.options,p.modules);</script>');
+    '<script type="module">const p='+payload+';await ('+loadGuardSource+')(p.options,async()=>{const {boot}=await import("/__forge__/platform.js");await boot(p.options,p.modules);});</script>');
   }},
   configureServer(server){
    server.middlewares.use((req,res,next)=>{
@@ -42,7 +44,7 @@ export function createPreviewPlugin(options,bootstrapSource) {
   }
  };
 }
-export const PREVIEW_RUNTIME_FINGERPRINT=createHash('sha256').update(createPreviewPlugin.toString()+previewBootstrap.toString()).digest('hex');
+export const PREVIEW_RUNTIME_FINGERPRINT=createHash('sha256').update(createPreviewPlugin.toString()+previewBootstrap.toString()+previewLoadGuard.toString()).digest('hex');
 export function previewHostOrigin(settings) {
  const configured=settings.forgePublicOrigin ||
   (settings.environmentId==='atoms-demo'?'https://idea-to-app-forge.onrender.com':null);
@@ -57,7 +59,7 @@ export function renderPreviewConfig(settings,owner) {
 import {loadConfigFromFile,mergeConfig} from 'vite';
 const env={command:'serve',mode:'development',isSsrBuild:false,isPreview:false};
 const original=await loadConfigFromFile(env,undefined,process.cwd());
-const plugin=(${createPreviewPlugin.toString()})(${JSON.stringify(options)},${JSON.stringify(previewBootstrap.toString())});
+const plugin=(${createPreviewPlugin.toString()})(${JSON.stringify(options)},${JSON.stringify(previewBootstrap.toString())},${JSON.stringify(previewLoadGuard.toString())});
 export default mergeConfig(original?.config||{},{plugins:[plugin]});
 `;
 }
