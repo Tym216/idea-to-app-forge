@@ -276,6 +276,19 @@ test('real Agent loop stops confirmed no-op write churn after three warnings wit
 });
 
 
+test('supplemental core assertion failure blocks checkpoint without rewriting the successful build fact',async()=>{
+ const f=await fixture({logicStatus:'failed'});assert.equal(f.error?.code,'VERIFY_FAILED');assert.equal(f.checkpoints,0);assert.equal(f.memories,0);
+ assert.equal(f.workspace.state.build.status,'passed');assert.equal(f.workspace.state.verify.status,'blocker');assert.equal(f.workspace.state.verify.result.logicChecks.status,'failed');
+ assert.ok(f.task.steps.some(s=>s.tool==='logic_check'&&s.ok===false));
+});
+test('pure test tool fault cannot publish a checkpoint or be mislabeled as a code assertion',async()=>{
+ const f=await fixture({logicStatus:'tool_error'});assert.equal(f.error?.code,'VERIFY_TOOL_ERROR');assert.equal(f.checkpoints,0);assert.equal(f.workspace.state.build.status,'passed');assert.equal(f.workspace.state.verify.status,'tool_error');
+});
+test('passing logic checks preserve HTTP-only inconclusive semantics and normal immutable checkpoint path',async()=>{
+ const f=await fixture({logicStatus:'passed',httpOnly:true});assert.equal(f.error,undefined);assert.equal(f.checkpoints,1);assert.equal(f.workspace.state.verify.status,'inconclusive');assert.equal(f.workspace.state.verify.result.logicChecks.status,'passed');assert.equal(f.workspace.state.verify.result.featureChecksRun,false);
+});
+
+
 test('real executeTask uses one committed bootstrap and sends its accurate source context without extra model turns',async()=>{
  const f=await fixture();assert.ifError(f.error);assert.equal(f.checkpoints,1);
  const bootstrap=f.changesets.filter(c=>c.origin==='scaffold');assert.equal(bootstrap.length,1);
@@ -289,4 +302,14 @@ test('real executeTask uses one committed bootstrap and sends its accurate sourc
 test('unconfirmed bootstrap cannot enter the model loop, Memory or checkpoint',async()=>{
  const f=await fixture({bootstrapFailure:true});assert.equal(f.error?.code,'WORKSPACE_UNCERTAIN');
  assert.equal(f.posts,0);assert.equal(f.checkpoints,0);assert.equal(f.memories,0);assert.equal(f.changesets.length,1);
+});
+
+
+test('blocked logic evidence reaches persisted report and resume prompt without completing or calling Memory',async()=>{
+ const f=await fixture({logicStatus:'failed',httpOnly:true,persistedRepair:true});assert.equal(f.error?.code,'VERIFY_FAILED');
+ const report=f.task.steps.findLast(s=>s.tool==='verify_report').result;
+ assert.equal(report.validationMode,'http');assert.equal(report.base.httpStatus,200);
+ assert.equal(report.logicChecks.status,'failed');assert.equal(report.logicChecks.failed,1);
+ assert.match(f.error.message,/ERR_ASSERTION/);assert.equal(f.error.verification.logicStatus,'failed');
+ assert.equal(f.checkpoints,0);assert.equal(f.memories,0);assert.equal(report.items[0].status,'inconclusive');
 });

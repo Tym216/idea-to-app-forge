@@ -343,7 +343,10 @@ export function formatObservation(v, round, maxRounds) {
     inconclusive: '应用可以预览；部分交互尚未得到自动验收结论。',
     success_with_warnings: '应用已生成并可以预览。自动验收发现非阻塞警告，你仍可以打开预览继续测试。' }[v.kind];
   const lines = [heading, v.validationMode==='http' ? '快速模式：浏览器渲染及交互未检查' : '第 ' + round + '/' + maxRounds + ' 次浏览器验收'];
-  if (v.base.blocking?.length) lines.push('页面基础检查未通过，详细证据已保存。');
+  if (v.base?.blocking?.length) {
+    lines.push('阻断原因：');
+    for(const reason of v.base.blocking)lines.push(String(reason).slice(0,2600));
+  }
   for (const i of v.items) {
     const mark = { verified: '✓', warning: '警告', blocker: '阻断', inconclusive: '证据不足', missing_config: '缺少配置', unverifiable: '无法验证' }[i.status];
     lines.push('- ' + i.id + ' ' + mark + ' ' + i.action + ' → ' + i.expect);

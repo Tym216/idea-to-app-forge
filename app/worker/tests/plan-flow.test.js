@@ -151,3 +151,11 @@ test('budget failure summary preserves cost details and points to the effective 
   assert.match(result.next,/不会自动加预算或重试/);
  }
 });
+
+
+test('HTTP and code-logic blockers are not mislabeled as browser acceptance failure',()=>{
+ const logic=Object.assign(new Error('checks failed'),{code:'VERIFY_FAILED',verification:{mode:'http',logicStatus:'failed',logicFailed:2}});
+ const summary=summarizeError(logic,{});assert.match(summary.reason,/代码逻辑.*2.*测试样例/);assert.ok(!summary.reason.includes('浏览器'));
+ const http=summarizeError(Object.assign(new Error('HTTP 500'),{code:'VERIFY_FAILED',verification:{mode:'http'}}),{});
+ assert.match(http.reason,/HTTP/);assert.ok(!http.reason.includes('浏览器'));
+});

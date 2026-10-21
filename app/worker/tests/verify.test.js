@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateChecks, classifyResult, parseRunnerOutput, ensureBrowser, RUNNER_SOURCE } from '../src/verify.js';
+import { formatObservation, validateChecks, classifyResult, parseRunnerOutput, ensureBrowser, RUNNER_SOURCE } from '../src/verify.js';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -98,4 +98,12 @@ test('选择器找不到与断言执行异常属于证据不足，不能当作�
   [{ ...acceptance[0], severity: 'core' }]);
   assert.equal(uncertain.kind, 'inconclusive');
   assert.equal(uncertain.items[0].status, 'inconclusive');
+});
+
+
+test('failure observation includes actual blocking evidence, not only unrelated unexecuted acceptance',()=>{
+ for(const reason of ['入口脚本 HTTP 500','核心纯逻辑断言失败：ERR_ASSERTION expected true actual false']){
+  const text=formatObservation({kind:'blocker',validationMode:'http',base:{blocking:[reason]},items:[{id:'A1',status:'inconclusive',action:'start',expect:'moves'}]},1,2);
+  assert.ok(text.includes(reason));assert.ok(text.includes('证据不足'));assert.ok(text.includes('浏览器渲染及交互未检查'));
+ }
 });

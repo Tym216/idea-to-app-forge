@@ -31,7 +31,11 @@ export function summarizeError(error, task) {
     FIX_LIMIT_REACHED: ['构建或浏览器验收已达到修复次数上限', '查看失败步骤后「恢复任务」或补充修复要求'],
     VERIFY_BLOCKED: ['关键功能需要外部服务配置或尚无法验证', '查看验收步骤,补齐配置后恢复任务'],
     VERIFY_TOOL_ERROR: ['浏览器验收环境故障，本轮没有通过验收', '检查验收日志与沙箱环境，修复后恢复任务；已有代码保留'],
-    VERIFY_FAILED: ['浏览器验收未通过，已停止自动修复', '查看具体失败条件。尚有一次机会时可手动重试；验收定义有误则修订计划。代码与预览保留'],
+    VERIFY_FAILED: error.verification?.logicStatus==='failed'
+      ? [`代码逻辑检查有 ${error.verification.logicFailed ?? '部分'} 项断言失败，需核对实现或测试样例`, '代码和预览已保留。查看失败测试的 expected/actual 与前置条件；确认修复后再检查，不能直接重验相同源码或删除检查来通过']
+      : error.verification?.mode==='http'
+        ? ['应用 HTTP 服务检查未通过，代码和预览地址已保留', '查看 HTTP 状态、入口脚本和服务错误后修复；这不是浏览器交互验收失败']
+        : ['浏览器验收未通过，已停止自动修复', '查看具体失败条件。尚有一次机会时可手动重试；验收定义有误则修订计划。代码与预览保留'],
     VERIFY_ATTEMPT_LIMIT: ['本任务已用完两次浏览器验收机会', '检查失败条件或修订计划，再明确开始新任务；不会继续自动调用模型'],
     ACCEPTANCE_MISSING: ['缺少本轮验收条件', '重新生成或修订计划后再构建'],
     PLAN_REVISION_REQUIRED: ['已批准的验收定义需要修订', '切换 Plan,描述需要调整的验收条件;审阅新版本后再批准构建。不要恢复旧任务'],

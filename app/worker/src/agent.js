@@ -1,4 +1,5 @@
 import {buildBootstrapChanges} from './build-bootstrap.js';
+import {LOGIC_GUIDANCE,logicEvidenceValid,runLogicChecks,mergeLogicResult} from './logic-checks.js';
 import { buildActionContext } from './action-context.js';
 import { reconcileBuildWorkspace } from './runtime-recovery.js';
 import {browserVerificationEnabled,httpVerificationFingerprint,runHttpVerification} from './http-verification.js';
@@ -66,7 +67,7 @@ apply_changes（启用时）一次提交已确定的完整文件修改，可接�
 - 构建成功后，仅本任务已明确的网页验证流程由 Worker 自动启动并验收。
 - 不要把尚需读取结果才能决定的修改强行合并。`;
 
-const TOOLS_SPEC = `可用工具(每次只输出一个 JSON 对象):
+const TOOLS_SPEC = `${LOGIC_GUIDANCE}\n可用工具(每次只输出一个 JSON 对象):
 {"thought":"...","tool":"read_file","args":{"path":"src/App.tsx","offset":0}}
 {"thought":"...","tool":"write_file","args":{"path":"src/App.tsx","content":"完整文件内容"}}
 {"thought":"...","tool":"delete_file","args":{"path":"src/Old.tsx"}}
@@ -109,7 +110,7 @@ export async function runPlan(task, context, design, deps = defaultDeps) {
 export function previousVerificationFailure(task) {
   const previous = [...(task.steps || [])].reverse().find((step) => step.tool === 'verify' && step.ok === false && step.observation);
   if (!previous) return '';
-  return `上次浏览器验收失败（手动重试时优先定位此问题，不要重做整个应用）：\n${String(previous.observation).slice(0, 1800)}\n如果是验收定义错误，调用 request_plan_revision 停止并请求修订计划；不能擅改已批准的断言。`;
+  return `上次浏览器验收失败（手动重试时优先定位此问题，不要重做整个应用）：\n${String(previous.observation).slice(0, 1800)}\n先核对失败证据、实现和测试前置条件。补充测试的样例若可明确证明有误，应保持业务断言和覆盖、只修正样例并说明原因，不能删测试或放宽断言。如果是批准验收定义错误，调用 request_plan_revision 停止并请求修订计划；不能擅改已批准的断言。`;
 }
 
 export function genericProjectContext(_project, _task) { return { profile: 'generic', instructions: [] }; }
@@ -339,7 +340,7 @@ async function runTool(ctx, tool, args) {
       return { observation: ready && !commandId ? `复用健康开发服务器，Preview 已更新: ${previewUrl}` : `开发服务器已启动,预览地址: ${previewUrl}`, ok: true, result:{runtime:commandId?'started':'reused',previewUrl} };
       };
       const r = ctx.workspace ? await ctx.workspace.runtime('start', start) : await start();
-      if (ctx.workspace?.valid('verify', ctx.verifyBasis) && ctx.workspace.state.verify.result) {
+      if (ctx.workspace?.valid('verify', ctx.verifyBasis) && ctx.workspace.state.verify.result && logicEvidenceValid(ctx.workspace.manifest.files,ctx.workspace.state.verify.result.logicChecks)) {
         ctx.verificationResult = ctx.workspace.state.verify.result;
         progress.recordVerification(ctx.verificationResult);
       }
@@ -358,7 +359,7 @@ async function runTool(ctx, tool, args) {
         &&[currentVerifyBasis(ctx.acceptance,ctx.buildBasis,'full'),verifyFingerprint(ctx.acceptance,{runnerHash:sha256(RUNNER_SOURCE),playwrightVersion:PLAYWRIGHT_VERSION,buildBasis:ctx.buildBasis})].some(basis=>ctx.workspace.valid('verify',basis))
         &&reclassifyStoredVerification(previousFull.result,ctx.acceptance)?.kind==='blocker')
         throw new AgentStopError('VERIFY_FAILED','当前源码仍有已确认的阻断问题；需实际修改代码，关闭浏览器验收不能将它改为通过。');
-      if (ctx.workspace?.valid('verify', ctx.verifyBasis)) {
+      if (ctx.workspace?.valid('verify', ctx.verifyBasis) && (ctx.workspace.state.verify.status === 'blocker' || logicEvidenceValid(ctx.workspace.manifest.files,ctx.workspace.state.verify.result?.logicChecks))) {
         const previous = ctx.workspace.state.verify;
         if (['passed', 'success_with_warnings', 'inconclusive'].includes(previous.status)) {
           ctx.verificationResult = previous.result; progress.recordVerification(previous.result);
@@ -373,19 +374,27 @@ async function runTool(ctx, tool, args) {
         observation: httpOnly?'快速检查：构建 + HTTP；浏览器渲染与功能验收已暂时关闭':healthOnly?'快速编辑检查：HTTP、渲染与 runtime；不运行功能交互验收':`第 ${attempt}/${MAX_VERIFY_ATTEMPTS} 次浏览器验收；失败后等待用户决定，不自动修复`,result:{mode:httpOnly?'http':healthOnly?'health':'full'} });
       const verify = () => httpOnly ? (ctx.deps.verifyHttpApp || runHttpVerification)({sandbox,sandboxId,acceptance:ctx.acceptance})
         : (ctx.deps.verifyApp || runVerification)({ sandbox, sandboxId, checks: validated.checks });
-      const raw = ctx.workspace ? await ctx.workspace.runtime('verify', verify) : await verify();
-      const result = httpOnly?raw:healthOnly?userApplyHealthResult(raw,ctx.acceptance):classifyResult(raw, ctx.acceptance);
+      const validate = async () => {
+        const raw = await verify();
+        const logic = ctx.workspace ? await (ctx.deps.verifyLogicApp || runLogicChecks)({sandbox,sandboxId,files:ctx.workspace.manifest.files}) : null;
+        return {raw,logic,timedOut:logic?.timedOut===true||raw?.timedOut===true};
+      };
+      const {raw,logic} = ctx.workspace ? await ctx.workspace.runtime('verify', validate) : await validate();
+      const result = mergeLogicResult(httpOnly?raw:healthOnly?userApplyHealthResult(raw,ctx.acceptance):classifyResult(raw, ctx.acceptance),logic);
+      if(logic)await ctx.deps.appendStep(task,{tool:'logic_check',phase:'verify',event:'finished',ok:logic.status==='passed',
+        observation:`纯逻辑检查 ${logic.status}：${logic.passed||0}/${logic.tests||0} 通过${logic.status==='passed'?'':'；'+redact(logic.details||'',600)}`,result:logic});
       if (ctx.workspace) await ctx.workspace.evidence('verify', ctx.verifyBasis, result.kind, result);
       ctx.verificationResult = result;
       progress.recordVerification(result);
       await ctx.deps.appendStep(task, { tool: 'verify_report', phase: 'verify',
-        observation: `验收结论: ${result.kind}`, result: { kind: result.kind,
+        observation: `验收结论: ${result.kind}`, result: { kind: result.kind, validationMode:result.validationMode, base:result.base, logicChecks:result.logicChecks, toolError:result.toolError,
           items: result.items.map((i) => ({ id: i.id, status: i.status, reason: i.reason,
             stepResults: i.status === 'verified' ? [] : i.stepResults })) } });
       if (result.kind === 'tool_error') throw new AgentStopError('VERIFY_TOOL_ERROR', formatObservation(result, attempt, MAX_VERIFY_ATTEMPTS));
       // Missing external configuration or ambiguous assertions remain unverified in the report.
       if (result.kind === 'blocker') {
-        throw new AgentStopError('VERIFY_FAILED', formatObservation(result, attempt, MAX_VERIFY_ATTEMPTS));
+        throw Object.assign(new AgentStopError('VERIFY_FAILED', formatObservation(result, attempt, MAX_VERIFY_ATTEMPTS)),
+          {verification:{mode:result.validationMode,logicStatus:result.logicChecks?.status,logicFailed:result.logicChecks?.failed}});
       }
       return { observation: formatObservation(result, attempt, MAX_VERIFY_ATTEMPTS), ok: true };
     }
@@ -609,7 +618,8 @@ async function executeOperation(ctx, tool, args, automatic) {
   await ctx.deps.checkLease();
   if (automatic) consumeStep(ctx);
   const reuse = tool === 'build' && ctx.workspace?.valid('build', ctx.buildBasis) && ctx.workspace.state.build.status === 'passed'
-    || tool === 'verify' && ctx.workspace?.valid('verify', ctx.verifyBasis) && ['passed','success_with_warnings','inconclusive'].includes(ctx.workspace.state.verify.status);
+    || tool === 'verify' && ctx.workspace?.valid('verify', ctx.verifyBasis) && ['passed','success_with_warnings','inconclusive'].includes(ctx.workspace.state.verify.status)
+      && logicEvidenceValid(ctx.workspace.manifest.files,ctx.workspace.state.verify.result?.logicChecks);
   if (!reuse && !['write_file', 'apply_changes'].includes(tool)) recordOperation(tool);
   if (automatic) {
     markRunning(ctx.task.plan, tool);
