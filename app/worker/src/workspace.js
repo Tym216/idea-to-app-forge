@@ -1,3 +1,4 @@
+import { logger } from './logger.js';
 import path from 'node:path';
 import { redact } from './telemetry.js';
 import { randomUUID } from 'node:crypto';
@@ -84,8 +85,7 @@ export class Workspace {
     const writer = await this.acquire('materialize');
     try {
       await wake();
-      await this.gateway.run('activate', writer);
-      const actual = await this.gateway.scan();
+      const {manifest:actual} = await this.gateway.run('activate_scan', writer);
       if (!newSandbox && actual.code_hash !== this.manifest.code_hash) throw sourceError('WORKSPACE_CONFLICT', '现存沙箱源码与持久化基线不同；保留原内容，需核对');
       // Confirmed identical source needs no rewrite; avoid unnecessary HMR reloads on re-entry.
       if(newSandbox||actual.code_hash!==this.manifest.code_hash)await this.gateway.run('materialize', writer, { files: this.manifest.files, target_hash: this.manifest.code_hash, expected_hash: actual.code_hash });
@@ -165,8 +165,7 @@ export class Workspace {
     const change = await this.prepare(recorded, origin, target, requestId);
     const writer = await this.acquire('mutation', change.id);
     try {
-      await this.gateway.run('activate', writer);
-      const actual = await this.gateway.scan();
+      const {manifest:actual} = await this.gateway.run('activate_scan', writer);
       if (actual.code_hash !== baseline.code_hash) throw sourceError('WORKSPACE_CONFLICT', '写入前发现源码漂移；未覆盖');
       for (const [i, c] of changes.entries()) await beforeWrite(i, c.path);
       if (recorded.length) invalidate();
@@ -192,8 +191,8 @@ export class Workspace {
     if (target.code_hash !== change.target_hash) throw sourceError('WORKSPACE_CONFLICT', 'Persisted submission hash mismatch');
     const writer = await this.acquire('mutation', change.id);
     try {
-      await this.gateway.run('activate', writer);
-      if ((await this.gateway.scan()).code_hash !== baseline.code_hash) throw sourceError('WORKSPACE_CONFLICT', 'Physical source changed before Apply');
+      const {manifest:actual} = await this.gateway.run('activate_scan', writer);
+      if (actual.code_hash !== baseline.code_hash) throw sourceError('WORKSPACE_CONFLICT', 'Physical source changed before Apply');
       const result = await this.gateway.run('promote', writer, { baseline: baseline.files, files: target.files, target_hash: target.code_hash });
       return await this.commit(writer, change, result.manifest);
     } catch (e) {
@@ -202,13 +201,16 @@ export class Workspace {
     }
   }
   async runtime(kind, run, { adoptLockfile = false, baseRevision = this.state?.revision } = {}) {
+    const started=performance.now();
     await this.read();
     if (baseRevision == null || baseRevision !== this.state.revision) throw sourceError('WORKSPACE_REVISION_CONFLICT', '运行请求的源码依据已变更，未执行');
     const baseline = this.manifest, writer = await this.acquire(kind);
     try {
-      await this.gateway.run('activate', writer);
-      if ((await this.gateway.scan()).code_hash !== baseline.code_hash) throw sourceError('WORKSPACE_CONFLICT', '运行前源码已漂移');
+      const activated = await this.gateway.run('activate_scan', writer);
+      if (activated.manifest.code_hash !== baseline.code_hash) throw sourceError('WORKSPACE_CONFLICT', '运行前源码已漂移');
+      const commandStarted=performance.now();
       const result = await run();
+      const commandFinished=performance.now();
       if (result?.timedOut) throw sourceError('WORKSPACE_UNCERTAIN', '命令超时，旧进程未确认停止');
       const actual = await this.gateway.scan(), diff = sourceDiff(baseline, actual);
       if (diff.length) {
@@ -217,6 +219,10 @@ export class Workspace {
         await this.commit(writer, change, actual);
       } else await this.call('ita_workspace_finish_operation', { p_token: writer.token, p_hash: actual.code_hash });
       await this.read();
+      const finished=performance.now();
+      logger.info('workspace.runtime_timing',{projectId:this.scope.p_project_id,kind,revision:this.state.revision,
+        preflight_ms:Math.round(commandStarted-started),command_ms:Math.round(commandFinished-commandStarted),
+        confirmation_ms:Math.round(finished-commandFinished),total_ms:Math.round(finished-started)});
       return result;
     } catch (e) { await this.block(writer, e, e.code === 'WORKSPACE_CONFLICT' ? 'conflict' : e.code === 'WORKSPACE_PARTIAL' ? 'partial' : 'uncertain'); throw e; }
   }

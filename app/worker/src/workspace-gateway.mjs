@@ -58,11 +58,11 @@ async function safePath(p) {
 let applied = [];
 async function main() {
   if (spec.mode === 'scan') return { manifest: await scan() };
-  if (spec.mode === 'activate') {
+  if (spec.mode === 'activate' || spec.mode === 'activate_scan') {
     const current = await fence();
     if (current.epoch > spec.epoch || (current.epoch === spec.epoch && (current.token !== spec.token || current.retired))) throw new Error('WORKSPACE_FENCE_LOST');
     await atomic(fenceFile, JSON.stringify({ epoch: spec.epoch, token: spec.token, base_hash: spec.base_hash, target_hash: spec.target_hash }));
-    return { activated: true };
+    return spec.mode === 'activate_scan' ? {activated:true,manifest:await scan()} : {activated:true};
   }
   if (spec.mode === 'retire') {
     const current = await fence();

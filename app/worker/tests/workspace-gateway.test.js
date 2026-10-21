@@ -79,3 +79,26 @@ test('a durable newer unactivated writer can retire an older fence; no late old 
  assert.equal((await f.run('retire')).error,'WORKSPACE_FENCE_LOST');
  assert.equal((await f.run('scan')).manifest.files.length,0);
 });
+
+
+test('fused activate_scan returns the same complete manifest under the existing flock and rejects stale writer',async t=>{
+ const f=await fixture(t),files=[{path:'src/a.ts',content:'A'}];await f.run('promote',{baseline:[],files});
+ const result=await f.run('activate_scan');assert.equal(result.activated,true);assert.equal(result.manifest.code_hash,sourceManifest(files).code_hash);
+ const next={epoch:2,token:randomUUID()};await f.run('activate_scan',{},next);
+ assert.equal((await f.run('activate_scan')).error,'WORKSPACE_FENCE_LOST');
+ await fs.symlink('/tmp',path.join(f.root,'managed-link'));
+ assert.match((await f.run('activate_scan',{},next)).error,/SYMLINK/);
+});
+
+
+test('fused mutation preflight preserves partial recovery, unchanged-file mtimes and retired-token rejection',async t=>{
+ const f=await fixture(t),files=[{path:'src/a.ts',content:'A'},{path:'src/b.ts',content:'B'}];
+ assert.equal((await f.run('activate_scan')).manifest.code_hash,sourceManifest([]).code_hash);
+ assert.equal((await f.run('promote',{baseline:[],files,testFailAfter:1})).error,'TEST_PARTIAL');
+ const stamp=(await fs.stat(path.join(f.root,'src/a.ts'))).mtimeMs;
+ await f.run('retire');const next={epoch:2,token:randomUUID()};
+ const scan=await f.run('activate_scan',{},next);assert.equal(scan.manifest.files.length,1);
+ const resumed=await f.run('promote',{baseline:[],files},next);assert.equal(resumed.manifest.code_hash,sourceManifest(files).code_hash);
+ assert.deepEqual(resumed.operations.map(c=>c.path),['src/b.ts']);assert.equal((await fs.stat(path.join(f.root,'src/a.ts'))).mtimeMs,stamp);
+ assert.equal((await f.run('activate_scan')).error,'WORKSPACE_FENCE_LOST');
+});

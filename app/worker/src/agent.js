@@ -1,9 +1,11 @@
+import {buildBootstrapChanges} from './build-bootstrap.js';
+import { buildActionContext } from './action-context.js';
 import { reconcileBuildWorkspace } from './runtime-recovery.js';
 import {browserVerificationEnabled,httpVerificationFingerprint,runHttpVerification} from './http-verification.js';
 import {userApplyPolicy,userApplyHealthFingerprint,userApplyHealthResult} from './user-apply-validation.js';
 import { savedPreviewHealthy } from './preview-recovery.js';
 import { verificationContinuationCandidate, assertVerificationContinuationBasis } from './verification-continuation.js';
-import { renderPersistenceHelper, PERSISTENCE_GUIDANCE, PERSISTENCE_HOOK_SOURCE } from './app-persistence.js';
+import { PERSISTENCE_GUIDANCE } from './app-persistence.js';
 import { assertUserApplyExecution, executeUserApply, userApplyBasis } from './user-apply.js';
 import { validateRuntimeScript } from './workspace-policy.js';
 import { config } from './config.js';
@@ -15,10 +17,9 @@ import { assertExecutionActive, guardedSandbox, isSupabaseError, rethrowExecutio
 import { logger } from './logger.js';
 import { chat, chatResponse, parseJson } from './llm.js';
 import { getSandboxProvider } from './sandbox/index.js';
-import { SCAFFOLD_FILES } from './scaffold.js';
 import { loadMemories, renderMemories, extractMemories, upsertMemory } from './memory.js';
 import { AgentStopError, BuildProgress, mayModifyCode, verificationAttempts, requireVerificationBudget, requireNewRevisionForVerification, MAX_VERIFY_ATTEMPTS } from './build-progress.js';
-import { DESIGN_TOKENS_PATH, renderDesignPrompt, renderDesignTokensCss, resolveDesign, wantsDesignChange } from './design.js';
+import { DESIGN_TOKENS_PATH, renderDesignPrompt, resolveDesign, wantsDesignChange } from './design.js';
 import { findMissingDependencies, checkSandboxDependencies } from './deps-check.js';
 import { VERIFY_SPEC, RUNNER_SOURCE, PLAYWRIGHT_VERSION, validateChecks, runVerification, classifyResult, reclassifyStoredVerification, formatObservation, composeSummary } from './verify.js';
 import { withObservation, redact } from './telemetry.js';
@@ -256,7 +257,7 @@ async function runTool(ctx, tool, args) {
         progress.recordBuild(true);
         return { observation: '复用当前源码和构建依据的已成功证据，未重新构建。', ok: true, reused: true };
       }
-      const localDeps = ctx.userApplyPolicy ? findMissingDependencies(ctx.workspace.manifest.files.find(f=>f.path==='package.json')?.content||'',ctx.workspace.manifest.files) : null;
+      const localDeps = ctx.workspace ? findMissingDependencies(ctx.workspace.manifest.files.find(f=>f.path==='package.json')?.content||'',ctx.workspace.manifest.files) : null;
       const depsGate = localDeps ? localDeps.error || (localDeps.missing.length ? '未声明依赖：'+localDeps.missing.map(m=>m.name).join(', '):'') : await checkSandboxDependencies(sandbox, sandboxId);
       if (depsGate) return { observation: depsGate, ok: false };
       let result;
@@ -693,14 +694,13 @@ function formatResult(result) {
 }
 
 /** Scaffold is a logical mutation; hydration itself only materializes an existing revision. */
-export async function hydrateSandbox(workspace) {
-  const changes = Object.entries(SCAFFOLD_FILES).filter(([path]) => !workspace.manifest.files.some((f) => f.path === path))
-    .map(([path, content]) => ({ operation: 'write', path, content }));
+export async function hydrateSandbox(workspace, bootstrap = null) {
+  const changes = buildBootstrapChanges(workspace.manifest.files, bootstrap);
   if (changes.length) await workspace.apply(changes, { origin: 'scaffold' });
 }
 
 /** Build 前确定执行依据:已批准的计划版本 + 反馈;直接 Build 时生成简短行动计划(视为授权)。 */
-export async function resolveBuildBasis(task, context, deps) {
+export async function resolveBuildBasis(task, context, deps, {contextParts=task.contextParts}={}) {
   if (task.plan_id) {
     const plan = await deps.getPlan(task.plan_id, task.project_id);
     if (plan.status !== 'approved' && plan.kind !== 'action') {
@@ -722,7 +722,7 @@ export async function resolveBuildBasis(task, context, deps) {
   }
   await deps.updateTask(task.id, { phase: 'action_planning' });
   const action = await generateStructured({
-    chat: deps.chat, system: ACTION_PROMPT, context, validate: validateAction, taskId: task.id, code: 'ACTION_INVALID', purpose: 'action_plan', contextParts: task.contextParts,
+    chat: deps.chat, system: ACTION_PROMPT, context, validate: validateAction, taskId: task.id, code: 'ACTION_INVALID', purpose: 'action_plan', contextParts,
   });
   const plan = await deps.savePlan(task, 'action', action);
   await deps.updateTask(task.id, { plan_id: plan.id, plan_version: plan.version });
@@ -847,22 +847,24 @@ export async function executeTask(task) {
     return { summary: text };
   }
 
-  const basis = await resolveBuildBasis(task, context, deps);
+  const actionView = !task.plan_id ? buildActionContext({task,project,files,memoryText:renderMemories(memories),instructions:genericProjectContext(project,task).instructions}) : null;
+  if(actionView)await appendStep(task,{tool:'action_context',phase:'action_planning',observation:`轻量行动计划使用源码索引 ${actionView.indexChars} 字符；正式开发仍保留完整源码上下文`,result:{sourceChars:actionView.sourceChars,indexChars:actionView.indexChars}});
+  const basis = await resolveBuildBasis(task, actionView?.text || context, deps, {contextParts:actionView?.parts || task.contextParts});
 
   await updateTask(task.id, { phase: 'sandbox' });
-  await hydrateSandbox(workspace);
-  if (!workspace.manifest.files.some((f) => f.path === 'src/forge-persistence.ts')) await workspace.apply([{ operation: 'write', path: 'src/forge-persistence.ts', content: renderPersistenceHelper(config.environmentId, task.project_id) }], { origin: 'scaffold' });
-  if (!workspace.manifest.files.some((f) => f.path === 'src/forge-use-app-state.ts')) await workspace.apply([{ operation: 'write', path: 'src/forge-use-app-state.ts', content: PERSISTENCE_HOOK_SOURCE }], { origin: 'scaffold' });
   const preserveDesign = preserveIterationDesign(project, basis.plan, task.prompt)
     && workspace.manifest.files.some(f=>f.path===DESIGN_TOKENS_PATH);
-  if (!preserveDesign) await workspace.apply([{ operation: 'write', path: DESIGN_TOKENS_PATH, content: renderDesignTokensCss(design) }], { origin: 'design' });
+  await hydrateSandbox(workspace, {environmentId:config.environmentId,projectId:task.project_id,design,preserveDesign});
+  // Context must describe the committed bootstrap revision, not the earlier empty project.
+  // Approval/acceptance remains the same immutable basis; no additional model call.
+  const currentBuildContext = await buildContext(task, project, workspace.manifest.files, memories);
   const runtime = await buildRuntimeBasis(sandbox, sandboxId);
   const buildBasis = buildFingerprint(runtime);
   const mode=verificationMode();
   const verifyBasis = currentVerifyBasis(basis.acceptance,buildBasis,mode);
   await updateTask(task.id, { phase: 'react' });
   const { summary, previewUrl, verificationKind } = await runBuild(
-    task, project, sandbox, sandboxId, context, deps, `${basis.prompt}\n\n${preserveDesign ? ITERATION_DESIGN_PROMPT : renderDesignPrompt(design)}`, basis.acceptance,
+    task, project, sandbox, sandboxId, currentBuildContext, deps, `${basis.prompt}\n\n${preserveDesign ? ITERATION_DESIGN_PROMPT : renderDesignPrompt(design)}`, basis.acceptance,
     { planChars: basis.prompt.length, runtimePolicy: webValidationPolicy(basis.plan, config.actionFusionEnabled), workspace, buildBasis, verifyBasis, verificationMode:mode }
   );
 
@@ -882,8 +884,12 @@ export async function executeTask(task) {
 
 export async function buildRuntimeBasis(sandbox, sandboxId) {
   const js = `const fs=require('node:fs'),c=require('node:crypto'); const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>['NODE_ENV','NODE_OPTIONS'].includes(k)||k.startsWith('VITE_')).sort(([a],[b])=>a.localeCompare(b))); const files=fs.readdirSync('.').filter(p=>/^\\.env(?:\\..*)?$/.test(p)&&p!=='.env.example').sort().map(p=>[p,fs.readFileSync(p).toString('base64')]); console.log(JSON.stringify({nodeVersion:process.version,platform:process.platform,arch:process.arch,environmentHash:c.createHash('sha256').update(JSON.stringify({env,files})).digest('hex')}));`;
-  const r = await sandbox.exec(sandboxId, `node -e ${shellQuote(js)}`, { timeoutMs: 20000 });
-  const npm = await sandbox.exec(sandboxId, 'npm --version', { timeoutMs: 20000 });
+  const probes = await Promise.allSettled([
+    sandbox.exec(sandboxId, `node -e ${shellQuote(js)}`, { timeoutMs: 20000 }),
+    sandbox.exec(sandboxId, 'npm --version', { timeoutMs: 20000 }),
+  ]);
+  for(const probe of probes)if(probe.status==='rejected')throw probe.reason;
+  const [r,npm] = probes.map(p=>p.value);
   if (r.exitCode !== 0 || r.timedOut || npm.exitCode !== 0 || npm.timedOut) throw sourceError('WORKSPACE_ENVIRONMENT', '无法取得真实构建环境依据');
   return { ...JSON.parse(r.stdout.trim()), npmVersion: npm.stdout.trim(), command: 'npm run --ignore-scripts build', installCommand: INSTALL_CMD };
 }

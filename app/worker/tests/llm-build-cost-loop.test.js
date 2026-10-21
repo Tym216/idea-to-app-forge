@@ -274,3 +274,19 @@ test('real Agent loop stops confirmed no-op write churn after three warnings wit
  assert.ok(f.workspace.manifest.files.some(x=>x.path==='src/levels.ts'&&x.content==='export const levels = [];'));
  assert.equal(f.task.steps.filter(x=>x.tool==='write_file'&&x.event==='finished'&&x.code_changed===true).length,1);
 });
+
+
+test('real executeTask uses one committed bootstrap and sends its accurate source context without extra model turns',async()=>{
+ const f=await fixture();assert.ifError(f.error);assert.equal(f.checkpoints,1);
+ const bootstrap=f.changesets.filter(c=>c.origin==='scaffold');assert.equal(bootstrap.length,1);
+ assert.deepEqual(new Set(bootstrap[0].paths),new Set([...Object.keys(SCAFFOLD_FILES),'src/forge-persistence.ts','src/forge-use-app-state.ts','src/design-tokens.css']));
+ const context=f.modelRequests[0].messages[1].content;
+ for(const path of bootstrap[0].paths)assert.ok(context.includes('--- '+path+' ---'),path+' missing from first model context');
+ assert.ok(!context.includes('(空项目,尚未生成任何业务代码)'));
+ assert.equal(f.task.contextParts.initial_code,context.slice(context.indexOf('当前已有代码:')+'当前已有代码:\n'.length,context.indexOf('\n\n本轮用户需求:')).length);
+ assert.equal(f.decisions,2);assert.equal(f.memories,1);assert.equal(f.planWrites,0);
+});
+test('unconfirmed bootstrap cannot enter the model loop, Memory or checkpoint',async()=>{
+ const f=await fixture({bootstrapFailure:true});assert.equal(f.error?.code,'WORKSPACE_UNCERTAIN');
+ assert.equal(f.posts,0);assert.equal(f.checkpoints,0);assert.equal(f.memories,0);assert.equal(f.changesets.length,1);
+});
