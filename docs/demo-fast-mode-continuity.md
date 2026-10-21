@@ -17,7 +17,7 @@ HTTP evidence 使用独立 fingerprint，绑定源码 revision/hash、build basi
 
 这是生成机制与契约，不是已经改写所有历史应用。历史应用若只使用 useState，无法从 iframe 外部自动恢复未保存的内部状态，需正常迭代接入。已有 helper 无 reset 时，新 hook 可显式 write 初始值；坏数据仍不得绕过旧保护自动清除。
 
-同一浏览器、同一 Preview origin 下可刷新/退出再进入；换浏览器、清除站点数据或代理域名变化不属于本地存储的跨域同步能力。未引入存储桥接、云同步或业务数据库。
+当前 Vite 预览已接入可信 Forge 父页面的 localStorage 桥接，按 environment / Supabase / account / project 保存，兼容代码版本和 Daytona 代理域名变化不切换业务数据空间。换浏览器、清除站点数据及未保存的内存状态仍无法恢复；未引入云同步或业务数据库。完整边界见[版本与平台数据](app-version-and-platform-state.md)。
 
 ## Preview
 

@@ -47,6 +47,6 @@ BUILD_PROVIDER_OPTIONS={}
 
 ## 验证边界
 
-离线测试覆盖请求映射、temperature、未知能力、响应归一、文本/原生工具边界，以及 chat 与 Planner 协议修正的接线。尚未使用真实模型验证供应商行为、延迟或生成质量；不能把测试中的 mock 响应当作线上兼容保证。
+离线测试覆盖请求映射、temperature、未知能力、响应归一、文本/原生工具边界，以及 chat 与 Planner 协议修正的接线。部分供应商已经历真实任务联调，但这不覆盖所有模型、版本或路由；不能把测试中的 mock 响应当作线上兼容保证，也没有统计性的延迟/生成成功率承诺。
 
 参数依据：[DeepSeek](https://api-docs.deepseek.com/guides/thinking_mode/)、[OpenRouter](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)、[Gemini OpenAI 兼容接口](https://ai.google.dev/gemini-api/docs/openai)、[Ollama OpenAI 兼容接口](https://docs.ollama.com/api/openai-compatibility)。本地模型及服务版本的支持范围需实际核实。

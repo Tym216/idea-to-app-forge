@@ -1,56 +1,36 @@
-# Retry v1：分类处理，限制自动重发
+# 重试、修正和恢复
 
-只修改 Worker，无新依赖、数据库迁移或前端操作。保留 `.env`，停止旧 Worker，再从 `app/worker` 运行 `npm start` 加载更新。
+这些机制分别解决不同问题，不是一个无限重试循环。Provider 错误统一从 `classifyProviderError` 分类，不在 Agent 各工具内散落供应商判断；当前不会自动换模型。
 
-## 处理边界
+## Provider retry
 
-| 情况 | 处理 |
-|---|---|
-| 设计对比度、间距不理想 | 保留生成值，warning 后继续，不重新生成或自动换色 |
-| Design / Plan / Build 输出无法解析或缺必要字段 | 最多一次协议修正，仍不合法则停止 |
-| 保存设计约定失败 | 按存储错误停止，不归为 DESIGN_INVALID、不重生成 |
-| 事后辅助记忆抽取、保存失败 | warning；不改变已完成的主要工作，不发起语义修复 |
-| 暂停、取消、租约失效、执行许可检查失败 | 停止，不能作为辅助错误吞掉 |
-| 命令超时 | 查询进程辅助诊断，以 COMMAND_UNCERTAIN 停止，不重放 |
-| 文件写入未确认 | 沿用 durable intent 和 reconcile，先核对再继续 |
-| 构建/浏览器功能失败 | 保留原有修复预算与停止机制，本轮不扩展 Agent Repair |
+- 已知瞬时连接错误、HTTP 408、500/502/503/504，以及排除额度错误后的 429，最多重发一次。
+- 余额/额度不足、鉴权或配置错误、完整请求超时、不可用输出和未知错误，不用同一机制盲重发。
+- 普通瞬时错误等待 300–600ms；限流等待 1500–1800ms。有更长 Retry-After 时遵守，但超过 5 秒直接停止，不提前发送。
+- 同一个序列化 body、模型和共享 deadline，最多两个物理请求；默认模型时限 120 秒，短修复调用可进一步缩短。等待及每次派发都检查 abort / 租约。
 
-接受低对比度不代表符合可访问性要求。设计仍需满足生成 CSS 所需的结构和类型。辅助记忆批次不是事务，失败前已保存的项保留；保存设计约定属于任务的持久化契约，与可选的事后抽取分开处理。
+供应商可能已处理断开的请求并计费，不能保证上游恰好一次。未知 usage 不填零；强费用保护对每个物理请求分别预留。
 
-## Provider 统一入口
+## 协议修正
 
-`provider-retry.js` 的 `classifyProviderError` 返回 `retry_once` 或 `fail` 及原因；`withProviderRetry` 管理等待、预算与取消；`llm.js` 转换供应商错误并记录每次请求。以后 fallback 应从该入口扩展，不散落在工具中。本轮不自动切换模型。
+Design / Plan / Build 的输出无法解析或缺必要字段时，最多携带具体反馈修正一次，这是新的逻辑调用。输出截断不能执行半份文件，修正应要求更小且完整的动作，不能自动提高输出或费用额度。
 
-- **允许一次重发**：已知连接中断/临时 DNS 或连接错误、HTTP 500/502/503/504、明确限流或带 Retry-After 的 429。
-- **不重发**：额度/余额不足（含智谱 1113）、402、鉴权/配置错误、未知 429、请求超时、空或不可用的模型返回。额度判断优先于 Retry-After。
-- **等待有界**：失败后等待 300–600ms 随机抖动；Retry-After 更长则遵守，但超过 5 秒直接停止，不提前发送。
-- **共享预算**：相同请求体、同一模型，最多两个实际请求共享 120 秒截止时间。预算不足不继续，重发前复查暂停与租约，等待期间可中止。
-- 已等满 120 秒的免费模型调用不会自动再等 120 秒。本轮不解决模型长期慢或不可用的问题。
-- 中断请求可能已被供应商处理和计费，无法保证供应商恰好执行一次。没有 usage 就保留未知。
+设计审美、间距或对比度不理想只提示并继续，不重生成整个 Design。设计仍需满足可执行的结构与类型。保存设计约定失败按持久化问题处理，不能冒充 DESIGN_INVALID 再生成；事后可选记忆失败记 warning，执行许可或租约失败仍必须传播。
 
-协议修正携带新的校验反馈，计作新的逻辑调用；Provider 重发属于同一逻辑调用。两层预算分别生效：允许一次协议修正的阶段，最多两次逻辑调用、四次实际请求。任务总超时及执行许可仍约束整个流程。
+## Runtime recovery
 
-## 测量与验证
+文件部分写入、状态未知或命令超时，先核对原操作、进程及 canonical manifest，再决定是否续接。租约过期不等于远程副作用结束。受控写入复用 ChangeSet reconcile；普通 runtime 恢复的生命周期证明见[运行恢复](build-runtime-recovery.md)。不能手改 writer / revision 或直接重复命令来解锁。
 
-`logical_model_turn_count` 记录逻辑调用，`model_request_count` 记录实际发送（含失败/重发）。每条 `model.request` 和 Langfuse generation 带 `logical_call_id`、`attempt`、独立 `request_id`；重发产生另一条 generation，不覆盖第一次记录。未知用量不填 0，部分合计标记 `usage_incomplete`。模型请求耗时不含退避，任务耗时包含等待。旧日志没有逻辑计数时报告未知/不完整，不倒推。
+## Agent repair
 
-代码标识默认 `retry-v1`；若现有 `.env` 显式设置了 `METRICS_CODE_VERSION=fusion-v1`，会覆盖默认值，做对比前请手动更新该标签。对比 Fusion 开关时使用相同 retry 策略、供应商、模型和初始条件。此前两次调用、约 44 秒、未进入 Build 的设计失败保留为设计阶段故障样本，不纳入 Build 性能对照。
+构建错误与功能断言提供新证据时，Agent 可在原预算内修代码。明确验收 blocker 另有[一次受限快速修复](verification-repair.md)：准入、4 次模型调用、90 秒决策/派发预算和持久化标记分别生效，不会因暂停或重启无限刷新额度。同一任务验收次数上限仍为两次，不能重复验收相同源码，也不能放宽已批准的标准。User Apply / Restore 保持零 LLM。
 
-```bash
-cd /home/brilliant-tai/idea-to-app_v0.75/app/worker
-npm test
-npm run check
-npm run metrics:compare -- /tmp/forge-baseline.log /tmp/forge-fusion.log
-```
+HTTP-only 模式未运行浏览器检查时是 inconclusive，不冒充 assertion false；真正核心断言失败仍阻断。辅助功能失败不应掩盖实际主流程故障。
 
-本轮以模拟模型、数据库和沙箱验证原配色一次通过、存储错误分类、控制错误不吞、重发上限/共享预算、暂停/租约阻断、逻辑/物理计数、命令超时不重放。没有调用真实模型、Daytona 或 Langfuse Cloud，真实成功率和成本收益仍待验证。
+## 观测与兼容性
 
-## 当前限制与后续
+Telemetry 区分 logical model turns 和 physical provider requests；每次物理请求有独立 request ID、attempt 和共享 logical-call ID。未知用量保留缺失状态。指标标签由运行配置决定，不能只凭历史版本标签推导收益。
 
-浏览器首次验收失败仍停止，由用户决定是否继续；累计验收次数上限不变。通用 shell 命令尚无自动结果核对协议，COMMAND_UNCERTAIN 后需人工核对沙箱日志与操作结果再决定继续。“恢复任务”不代表已证明可以安全重放命令，文件写入的 reconcile 不覆盖任意 shell 副作用。
+已复现的 `glm-4.5-air` JSON mode 兼容问题由 adapter 明确处理：即使配置 on 也不发送 `response_format`；`glm-4-plus` 在 auto 下也省略。仍要求模型返回 JSON 并校验协议，不将错误文件名自动猜成另一个路径。其他模型不能据此推断同样行为。
 
-下一阶段才按真实证据调整 Agent Repair，不能仅因代码文本改变就无限修复，也不放宽已批准验收。ObservationPack、模型 fallback、小模型替换未在本轮实现。
-
-## 智谱 JSON 模式兼容
-
-用户对照测试已复现 glm-4.5-air 在 response_format=json_object 下输出错误文件名 package.，不带该字段时正常。auto 因此对 glm-4-plus / glm-4.5-air 不发送 response_format，保留提示词 JSON 要求和协议校验，temperature 不变。显式 ZHIPU_JSON_MODE=on 会强制启用，部署请使用 auto 或 off。此例外只针对已确认模型，不推断其他模型同样存在问题；真实任务的整体成功仍需复验。
+离线回归证明分类、上限、payload、状态和取消边界；不证明上游未来可用性、任意模型成功率或成本收益。ObservationPack 完整压缩、小模型决策替换及自动模型 fallback 不属于当前已完成能力。

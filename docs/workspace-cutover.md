@@ -1,3 +1,5 @@
+> **适用范围**：本文仅说明旧库升级 0006 的协议切换，不是当前 Demo 的日常启动步骤，也不授权操作 Main。新建环境的完整迁移顺序见[根 README](../README.md)。
+
 # Phase 2 切换与验证
 
 > 最新状态：revised 0006 的 **fresh v2 rehearsal 与 Main 只读 baseline compatibility 均 PASS**；以下旧记录保留历史上下文。整体仍 NO-GO，见 [新版真实验证记录](workspace-cutover-validation-v2.md)。

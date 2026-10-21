@@ -29,7 +29,6 @@ The runtime recipe is part of verification validity, with known old fixed accept
 A healthy current platform runtime is reused. A legacy runtime needs one explicit upgrade (or a normal Build/start): hold the workspace operation, stop the owned sandbox, confirm Stopped, start it, and launch the wrapper. No session deletion is treated as detached-process quiescence proof. Timeout/unknown lifecycle retains uncertainty.
 React remount and healthy refresh do not request recovery or restart.
 
-## Deployment boundary
-Local tests cover SQL authority/completion, original App identity, next real edit numbering, exact-source drift rejection, cross-origin browser storage, ownership, runtime upgrade and UI controls.
-This change is not yet active remotely. Demo activation requires additive 0013, matching Worker and frontend, followed by a bounded manual state/restore smoke. Main/restore are excluded.
-Do not start the new Worker on an un-migrated target: schema preflight rejects missing active App fields before task claims.
+## Deployment and validation boundary
+These features require additive 0013 plus the matching Worker and frontend; schema preflight rejects missing active App fields before task claims. Changing source alone does not migrate a target or upgrade an already-running preview runtime.
+Local tests cover SQL authority/completion, restored App identity, numbering, drift rejection, browser-storage ownership, runtime upgrade and UI controls. The Demo has also been exercised through normal public task/preview flows; this does not establish arbitrary App correctness, universal state capture, cross-device persistence or current service availability. No Main/restore migration or new remote validation is performed by this documentation update.

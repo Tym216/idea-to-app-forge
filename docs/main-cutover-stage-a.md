@@ -1,3 +1,5 @@
+> **历史记录**：本文保存当时环境、artifact 与验证结果，不是当前 Demo 的操作指令。请先阅读[当前文档导航](README.md)和[历史资料说明](history.md)。
+
 # Main cutover · Stage A readiness（2026-10-08）
 
 **结论：NO-GO。** 本轮只完成连接、只读检查、工具与待执行程序准备。Main 未 freeze、未 backup、未 restore、未执行 0006。未 push/deploy，Phase 3 未开始。Stage B 仍需用户批准。

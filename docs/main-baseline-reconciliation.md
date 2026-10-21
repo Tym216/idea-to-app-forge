@@ -1,3 +1,5 @@
+> **历史记录**：本文保存当时环境、artifact 与验证结果，不是当前 Demo 的操作指令。请先阅读[当前文档导航](README.md)和[历史资料说明](history.md)。
+
 # Main baseline reconciliation — 2026-10-08
 
 > 最新状态：revised 0006 的 **fresh v2 rehearsal 与 Main 只读 baseline compatibility 均 PASS**；以下旧记录保留历史上下文。整体仍 NO-GO，见 [新版真实验证记录](workspace-cutover-validation-v2.md)。

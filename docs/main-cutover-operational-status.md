@@ -1,3 +1,5 @@
+> **历史记录**：本文保存当时环境、artifact 与验证结果，不是当前 Demo 的操作指令。请先阅读[当前文档导航](README.md)和[历史资料说明](history.md)。
+
 # Main cutover operational status — NO-GO
 
 > 当前 Stage A（2026-10-08）以 [Main readiness / 待执行命令](main-cutover-stage-a.md) 为准；以下条目保留为历史记录，不能用于判断当前连接、工具或权限状态。

@@ -1,3 +1,5 @@
+> **历史记录**：本文保存当时环境、artifact 与验证结果，不是当前 Demo 的操作指令。请先阅读[当前文档导航](README.md)和[历史资料说明](history.md)。
+
 # Revised 0006 fresh rehearsal — 2026-10-08
 
 **Fresh rehearsal 全部 PASS；Main baseline prerequisite PASS。整体 cutover 仍为 NO-GO。** 本记录绑定新版 artifact，不能替代冻结、旧副作用收尾、实际备份/恢复验证和用户最终批准。

@@ -1,3 +1,5 @@
+> **历史记录**：本文保存当时环境、artifact 与验证结果，不是当前 Demo 的操作指令。请先阅读[当前文档导航](README.md)和[历史资料说明](history.md)。
+
 # Main Stage B operational proof — STOP / NO-GO
 
 > 最新状态（2026-10-09）：DEFAULT ACL 只读对比已完成。supabase_admin 的 3 组 baseline 等价，可作为精确省略候选；postgres 的 3 组真实不等价，按用户规则 STOP，未生成 derived execution plan 或重试 restore。Main 仍 frozen，sealed T0 recovery hash 未变。
