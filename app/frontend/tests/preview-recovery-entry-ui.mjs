@@ -16,7 +16,7 @@ try{
  browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.FORGE_TEST_CHROMIUM?{executablePath:process.env.FORGE_TEST_CHROMIUM}:{})});
  const page=await browser.newPage();await page.clock.install();
  const appHTML=await readFile(new URL('./stable-app.html',import.meta.url),'utf8');
- let warning=false;const healthHeaders=[];
+ let warning=false,healthFault=null;const healthHeaders=[];
  let healthy=false,job=null,requests=0,reads=0,unknownReads=0,unexpected=0,detailsFail=false;
  const project={id:'p',user_id:'u',name:'Stopped preview',sandbox_id:'same-sandbox',checkpoint_id:'v1',preview_url:'https://5173-offline-fixture.daytonaproxy01.net/',workspace_revision:12,workspace_hash:'unchanged',workspace_state:'confirmed',workspace_writer:null};
  const respond=(route,value,status=200)=>route.fulfill({status,contentType:'application/json',headers:{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'X-Daytona-Skip-Preview-Warning'},body:JSON.stringify(value)});
@@ -26,10 +26,13 @@ try{
    if(request.method()==='OPTIONS')return route.fulfill({status:204,headers:{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,OPTIONS','Access-Control-Allow-Headers':'X-Daytona-Skip-Preview-Warning'}});
    const isHealth=request.resourceType()==='fetch';
    if(isHealth){reads++;healthHeaders.push(request.headers()['x-daytona-skip-preview-warning']);if(unknownReads>0){unknownReads--;return route.abort('failed');}}
+   if(isHealth&&healthFault==='auth')return route.fulfill({status:302,headers:{Location:'https://auth.daytona.io/login','Access-Control-Allow-Origin':'*'}});
+   if(isHealth&&healthFault==='expired')return respond(route,{code:'UNAUTHORIZED'},401);
    if(warning||(isHealth&&request.headers()['x-daytona-skip-preview-warning']!=='true'))return route.fulfill({status:200,contentType:'text/html',headers:{'Access-Control-Allow-Origin':'*'},body:'<html><head><title>Daytona Preview - Warning</title></head><body>Preview URL Warning</body></html>'});
    if(!healthy)return respond(route,{code:'SANDBOX_NOT_RUNNING'},400);
    return route.fulfill({status:200,contentType:'text/html',headers:{'Access-Control-Allow-Origin':'*'},body:appHTML});
   }
+  if(url.hostname==='auth.daytona.io')return route.fulfill({status:200,contentType:'text/html',headers:{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'X-Daytona-Skip-Preview-Warning'},body:'<html>Daytona sign in</html>'});
   if(url.origin===origin)return route.continue();
   if(url.hostname!=='abcdefghijklmnopqrst.supabase.co'){unexpected++;return route.abort();}
   if(url.pathname==='/rest/v1/rpc/ita_request_preview_recovery'&&request.method()==='POST'){
@@ -76,6 +79,21 @@ try{
  healthy=false;job=null;detailsFail=true;await page.reload();
  for(let i=0;i<60&&requests<5;i++)await page.waitForTimeout(250);
  assert.equal(requests,5,'Unrelated editor/chat reads must not prevent checkpoint preview recovery');
+ // A 200 authentication landing page is not a working generated app.
+ for(const fault of ['auth','expired']){
+  healthFault=fault;
+  const result=await page.evaluate(async url=>{
+   const {probePreviewHealth}=await import('/src/lib/previewEntry.ts');return probePreviewHealth(url);
+  },project.preview_url);
+  if(fault==='expired')assert.equal(result,false);
+  else assert.notEqual(result,true,'A CORS-blocked authentication redirect is unknown, never healthy');
+ }
+ healthFault=null;
+ assert.equal(await page.evaluate(async url=>{
+  const {probePreviewHealth}=await import('/src/lib/previewEntry.ts');const original=window.fetch;
+  try{window.fetch=async()=>Object.defineProperty(new Response('<html>login</html>'),'url',{value:'https://auth.daytona.io/login'});return await probePreviewHealth(url);}
+  finally{window.fetch=original;}
+ },project.preview_url),false,'An observable 200 login landing page must be rejected');
  assert.equal(unexpected,0);
  console.log('PASS actual Workspace stopped-runtime auto recovery, pending dedup, same-URL completion, healthy re-entry/data, later-stop focus recheck, bounded unknown-read recovery and periodic read-only liveness; zero remote operations');
 }finally{await browser?.close();await server.close();}

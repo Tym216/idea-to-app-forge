@@ -176,7 +176,7 @@ pnpm run build --mode atoms-demo
 
 数据库回归位于 `app/backend/tests`，例如 `node rls.test.mjs`、`node plan.test.mjs`、`node deletion.test.mjs`、`node pause.test.mjs`、`node preview-recovery.test.mjs` 和 `npm run test:privileges`。这里的总 `npm test` 仍是占位脚本；不要把它当作所有数据库回归入口。
 
-截至本次整理，Worker **410/410** 离线测试以及前端 lint、TypeScript、构建通过。数据库真实权限/双连接并发、Daytona fixture 和公网生成曾分阶段验证，属于各自版本与条件下的证据；本轮文档整理未重跑这些远程操作，也不代表任意生成应用已通过功能验收。
+截至本次整理，Worker **413/413** 离线测试以及前端 lint、TypeScript、构建通过。数据库真实权限/双连接并发、Daytona fixture 和公网生成曾分阶段验证，属于各自版本与条件下的证据；本轮文档整理未重跑这些远程操作，也不代表任意生成应用已通过功能验收。
 
 ## 部署与已知限制
 

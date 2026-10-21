@@ -261,20 +261,19 @@ export class DaytonaProvider {
     return result.stdout.split('\n').map((line) => line.replace(/^\.\//, '').trim()).filter(Boolean);
   }
 
-  /**
-   * 预览地址。私有沙箱的预览需要 token(请求头 x-daytona-preview-token),
-   * iframe 无法带自定义头,因此优先使用带签名的 URL;失败时退回普通预览链接。
-   */
+  /** iframe cannot attach private preview headers. Never fall back to an unsigned login URL. */
   async previewUrl(sandboxId, port = 5173) {
     const { sandbox } = await this.resolve(sandboxId);
     try {
       const signed = await sandbox.getSignedPreviewUrl(port, 24 * 3600);
-      if (signed?.url) return signed.url;
+      const url = new URL(signed?.url || '');
+      if (url.protocol !== 'https:' || url.hostname === 'auth.daytona.io') throw new Error('Invalid signed preview URL');
+      return signed.url;
     } catch (error) {
-      logger.warn('daytona.signed_preview.failed', { sandboxId, error: String(error?.message || error) });
+      logger.warn('daytona.signed_preview.failed', { sandboxId, errorCode: String(error?.code || error?.name || 'Error') });
+      throw Object.assign(new Error('预览访问凭证暂时无法更新，源码与数据保留；请稍后重新检查预览。'),
+        { code: 'PREVIEW_AUTH_UNAVAILABLE', cause: error });
     }
-    const link = await sandbox.getPreviewLink(port);
-    return link?.url || '';
   }
 
   /** 只删除指定 ID 的沙箱;不存在视为已清理,返回 { existed:false }。其他错误原样抛出。 */

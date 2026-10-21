@@ -11,7 +11,10 @@ export async function probePreviewHealth(url:string):Promise<boolean|null> {
    ...(daytona?{headers:{'X-Daytona-Skip-Preview-Warning':'true'}}:{})});
   if(!response.ok)return false;
   // Defensive fallback for proxies that ignore the header. Do not call an interstitial healthy.
-  if(daytona){const body=await response.text();if(/<title>\s*Daytona Preview - Warning\s*<\/title>/i.test(body))return false;}
+  if(daytona){
+   if(response.url&&new URL(response.url).origin!==new URL(url).origin)return false;
+   const body=await response.text();if(/<title>\s*Daytona Preview - Warning\s*<\/title>/i.test(body))return false;
+  }
   return true;
  } catch {return null;}
 }

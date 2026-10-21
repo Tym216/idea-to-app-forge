@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 process.env.SUPABASE_URL ||= 'http://127.0.0.1:1';
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test';
-const { recoverExistingPreview, processOnePreviewRecovery } = await import('../src/preview-recovery.js');
+const { recoverExistingPreview, processOnePreviewRecovery, savedPreviewHealthy } = await import('../src/preview-recovery.js');
 
 function provider(state = 'stopped', readyInitially = false) {
   const calls = [];
@@ -131,4 +131,23 @@ test('unfinished first Build does not repeatedly start preview or replace its re
   rpc:async(fn,args)=>{updates.push(args);return {data:fn.includes('claim')?[{project_id:'p',user_id:'u',sandbox_id:'saved',execution_id:'e'}]:true};}});
  assert.equal(result.status,'failed');assert.deepEqual(p.calls,[]);
  assert.match(updates.at(-1).p_error,/尚未完成首次构建/);
+});
+
+
+test('saved preview health rejects expired authentication, cross-origin login and warning pages; unknown network stays unknown',async()=>{
+ const original=globalThis.fetch;let options;
+ const response=(body,status=200,url='https://5173-existing.daytonaproxy01.net/')=>Object.defineProperty(new Response(body,{status}),'url',{value:url});
+ try{
+  for(const [reply,want] of [
+   [response('Invalid or expired token',401),false],
+   [response('<html>login</html>',200,'https://auth.daytona.io/login'),false],
+   [response('<title>Daytona Preview - Warning</title>'),false],
+   [response('<html><div id="root"></div></html>'),true],
+  ]){
+   globalThis.fetch=async(_url,opts)=>{options=opts;return reply;};
+   assert.equal(await savedPreviewHealthy('https://5173-existing.daytonaproxy01.net/'),want);
+   assert.equal(options.headers['X-Daytona-Skip-Preview-Warning'],'true');assert.equal(options.credentials,'omit');
+  }
+  globalThis.fetch=async()=>{throw Error('network');};assert.equal(await savedPreviewHealthy('https://5173-existing.daytonaproxy01.net/'),null);
+ }finally{globalThis.fetch=original;}
 });

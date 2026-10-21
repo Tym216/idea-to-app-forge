@@ -5,7 +5,19 @@ import { redact } from './telemetry.js';
 
 export async function savedPreviewHealthy(url) {
  if(!url||!url.startsWith('https://'))return false;
- try {return (await fetch(url,{method:'GET',credentials:'omit',cache:'no-store',signal:AbortSignal.timeout(6000)})).ok;}
+ try {
+  const origin=new URL(url).origin;
+  const daytona=/\.(?:daytonaproxy\d*\.net|proxy\.daytona\.work)$/.test(new URL(url).hostname);
+  const response=await fetch(url,{method:'GET',credentials:'omit',cache:'no-store',signal:AbortSignal.timeout(6000),
+   ...(daytona?{headers:{'X-Daytona-Skip-Preview-Warning':'true'}}:{})});
+  if(!response.ok)return false;
+  // A login redirect or proxy warning is not application health, even when it returns 200.
+  if(daytona){
+   if(response.url&&new URL(response.url).origin!==origin)return false;
+   if(/<title>\s*Daytona Preview - Warning\s*<\/title>/i.test(await response.text()))return false;
+  }
+  return true;
+ }
  catch {return null;}
 }
 
