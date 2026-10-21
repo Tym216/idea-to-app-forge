@@ -121,3 +121,14 @@ test('inconclusive network/CORS observation does not replace a saved working ori
   existingUrl:'https://stable-preview.test/',probeUrl:async()=>null,
  }),'https://stable-preview.test/');
 });
+
+
+test('unfinished first Build does not repeatedly start preview or replace its retained writer',async()=>{
+ const p=provider();const updates=[];
+ const result=await processOnePreviewRecovery({workerId:'w',getSandbox:()=>p,
+  getProject:async()=>({id:'p',user_id:'u',sandbox_id:'saved',preview_url:null,checkpoint_id:null}),
+  workspaceFactory:()=>({state:{writer:{kind:'preview'},build:null},read:async()=>{},reconcileRuntime:()=>assert.fail('do not churn the sandbox'),initialize:()=>assert.fail('no materialization'),runtime:()=>assert.fail('no new writer')}),
+  rpc:async(fn,args)=>{updates.push(args);return {data:fn.includes('claim')?[{project_id:'p',user_id:'u',sandbox_id:'saved',execution_id:'e'}]:true};}});
+ assert.equal(result.status,'failed');assert.deepEqual(p.calls,[]);
+ assert.match(updates.at(-1).p_error,/尚未完成首次构建/);
+});

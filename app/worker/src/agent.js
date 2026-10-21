@@ -1,3 +1,4 @@
+import { reconcileBuildWorkspace } from './runtime-recovery.js';
 import {browserVerificationEnabled,httpVerificationFingerprint,runHttpVerification} from './http-verification.js';
 import {userApplyPolicy,userApplyHealthFingerprint,userApplyHealthResult} from './user-apply-validation.js';
 import { savedPreviewHealthy } from './preview-recovery.js';
@@ -28,6 +29,7 @@ import {
 import {
   admin,
   getRequestedChangeSet,
+  inspectRuntimeWriter,
   getCheckpointSource,
   addMessage,
   appendStep,
@@ -747,7 +749,7 @@ export async function executeTask(task) {
       if (workspace.state.writer.kind === 'legacy') throw sourceError('WORKSPACE_LEGACY_QUIESCENCE_REQUIRED', '旧 journal 尚未确认停止；保留原沙箱并人工核对');
       if (!existing.sandbox_id || existing.sandbox_id !== workspace.state.writer.sandbox_id) throw sourceError('WORKSPACE_UNCERTAIN', '待核对操作的原沙箱与项目绑定不一致');
       await sandbox.ensure(existing.sandbox_id, { projectId: task.project_id, userId: task.user_id, allowRecreate: false });
-      await workspace.reconcile();
+      await reconcileBuildWorkspace({workspace,provider:sandbox,task,inspectWriter:inspectRuntimeWriter,checkLease:()=>ensureLease(task.id)});
     }
     const ensured = await sandbox.ensure(existing.sandbox_id, { projectId: task.project_id, userId: task.user_id });
     sandboxId = ensured.sandboxId;

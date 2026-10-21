@@ -70,6 +70,9 @@ export async function processOnePreviewRecovery({ rpc, getSandbox, workerId, get
     provider.bindOwner?.(job.sandbox_id, { projectId: job.project_id, userId: job.user_id });
     const workspace = workspaceFactory({ rpc, projectId: job.project_id, workerId, executionId: job.execution_id, sandbox: provider, sandboxId: job.sandbox_id });
     if (workspace.read) await workspace.read();
+    // A partial first Build has no runnable preview to recover. Do not create a new runtime writer.
+    if (project && workspace.state && !project.preview_url && !project.checkpoint_id && workspace.state.build?.status !== 'passed')
+      throw new Error('应用尚未完成首次构建，请先完成或恢复开发任务；未启动预览');
     if (workspace.state?.writer) {
       const old=workspace.state.writer;
       await workspace.reconcileRuntime({inspect:writer=>inspectWriter(job.project_id,job.user_id,writer),
