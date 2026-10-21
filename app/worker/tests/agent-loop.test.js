@@ -289,3 +289,32 @@ test('manual verify records one attempt and one pass in task metrics', async () 
   assert.equal(metrics.verify_count, 1);
   assert.equal(metrics.verify_pass_count, 1);
 });
+
+
+test('provider length response is never executed, even when its JSON parses; one bounded split correction',async()=>{
+ const deps=fakeDeps([]),sb=fakeSandbox();let calls=0;
+ deps.chatResponse=async messages=>{
+  if(++calls===2){
+   assert.match(messages.at(-1).content,/拆成多个较小模块/);
+   assert.match(messages.at(-1).content,/不要原样重发/);
+   assert.ok(messages.every(m=>!m.content.includes('must-not-write.ts')));
+  }
+  return {text:JSON.stringify({tool:'write_file',args:{path:'src/must-not-write.ts',content:'truncated-code'}}),finishReason:'length'};
+ };
+ await assert.rejects(runBuild(newTask(),{},sb,'s','ctx',deps),{code:'LLM_OUTPUT_TRUNCATED'});
+ assert.equal(calls,2);assert.deepEqual(sb.calls,[]);assert.deepEqual(deps.upserts,[]);
+ assert.ok(deps.steps.filter(s=>s.tool==='llm_parse_error').every(s=>s.result.truncated&&s.result.finish_reason==='length'));
+});
+
+test('truncation correction can proceed with a complete smaller file and normal build validation',async()=>{
+ const actions=[{tool:'write_file',args:{path:'src/Small.tsx',content:'export const small = 1;'}},
+  {tool:'build',args:{}},{tool:'start_dev',args:{}},verifyAction,{tool:'finish',args:{summary:'done'}}];
+ const deps=fakeDeps(actions),sb=fakeSandbox();let calls=0;
+ const normalChat=deps.chat;
+ deps.chatResponse=async messages=>++calls===1
+  ?{text:'{"tool":"write_file","args":{"path":"src/large.tsx","content":"CUT',finishReason:'length'}
+  :{text:await normalChat(messages),finishReason:'stop'};
+ const result=await runBuild(newTask(),{},sb,'s','ctx',deps);
+ assert.equal(calls,6);assert.ok(result.previewUrl);
+ assert.ok(sb.calls.includes('write:src/Small.tsx'));assert.ok(!sb.calls.includes('write:src/large.tsx'));
+});

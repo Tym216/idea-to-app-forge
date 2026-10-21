@@ -12,7 +12,7 @@ import { validateChanges } from './apply-changes.js';
 import { recordToolCall, recordOperation } from './task-metrics.js';
 import { assertExecutionActive, guardedSandbox, isSupabaseError, rethrowExecutionControl } from './execution-control.js';
 import { logger } from './logger.js';
-import { chat, parseJson } from './llm.js';
+import { chat, chatResponse, parseJson } from './llm.js';
 import { getSandboxProvider } from './sandbox/index.js';
 import { SCAFFOLD_FILES } from './scaffold.js';
 import { loadMemories, renderMemories, extractMemories, upsertMemory } from './memory.js';
@@ -48,7 +48,7 @@ const verificationMode = () => browserVerificationEnabled(config.browserVerifica
 const currentVerifyBasis = (acceptance,buildBasis,mode) => mode==='http' ? httpVerificationFingerprint(acceptance,buildBasis)
   : verifyFingerprint(acceptance,{runnerHash:sha256(RUNNER_SOURCE+PREVIEW_RUNTIME_FINGERPRINT),playwrightVersion:PLAYWRIGHT_VERSION,buildBasis});
 
-const defaultDeps = { chat, appendStep, updateTask, updateProject, savePlan, addMessage, getLatestPlanVersion, listFiles, checkLease: null };
+const defaultDeps = { chat, chatResponse, appendStep, updateTask, updateProject, savePlan, addMessage, getLatestPlanVersion, listFiles, checkLease: null };
 
 export const INSTALL_CMD = 'npm install --no-audit --no-fund --ignore-scripts --package-lock=true';
 export const BUILD_CMD = `${INSTALL_CMD} && npm run build`;
@@ -78,6 +78,7 @@ ${VERIFY_SPEC}
 - 沙箱只有 npm；run_command 首版仅允许 npm install，源码改动必须使用文件工具；不要执行任意 shell 改写或 detached writer。
 - read_file 按 offset 分段返回(默认 4000 字符);若提示已截断,继续读取下一段,修改前应看完相关文件。
 - write_file 必须给出文件完整内容,不能用省略号或 diff;文件路径必须完整(如 package.json)。
+- 单次工具 JSON 受输出长度限制。较大实现先拆成独立的小模块，每次提交完整的小文件；不要把整个应用塞进一次 write_file/apply_changes。已确认内容不变时不要重复写同一文件，应继续实现其他部分或 build。
 - 脚手架已包含 package.json / vite.config.ts / index.html / src/main.tsx,通常只需修改 src 下的业务文件。
 - 新增第三方依赖时,先 write_file 更新 package.json,再 run_command 执行 npm install。
 - 源码 import 的第三方包(含 lucide-react 等图标/组件库)必须已在 package.json 声明,否则 build 会被拦截。
@@ -197,6 +198,7 @@ async function runTool(ctx, tool, args) {
         if (after === 'build' && error.operations) error.operations.push({ kind: 'build', status: 'not_run' });
         throw error;
       }
+      ctx.lastMutationChanged = result.changed;
       if (ctx.workspace) ctx.contextRevision = ctx.workspace.state.revision;
       if (after === 'build') {
         let built;
@@ -435,15 +437,19 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
     if (ctx.workspace) await ctx.workspace.assertCurrent(ctx.contextRevision);
     task.current_tool = null;
     await ctx.deps.updateTask(task.id, { phase: 'deciding' });
-    const raw = await ctx.deps.chat(history, { temperature: 0.1, json: true, reasoningMode: 'off', interactionMode: 'json_action', taskId: task.id,
+    const response = await (ctx.deps.chatResponse || ctx.deps.chat)(history, { temperature: 0.1, json: true, reasoningMode: 'off', interactionMode: 'json_action', taskId: task.id,
       purpose: 'build_decision', contextParts: {
         system: { plan_and_acceptance: options.planChars || 0, instructions: history[0].content.length - (options.planChars || 0) },
         user: task.contextParts,
       },
     });
+    const raw = typeof response === 'string' ? response : response.text;
+    const truncated = typeof response !== 'string' && ['length','max_tokens'].includes(response.finishReason);
     let action;
     let parsed = false;
     try {
+      // Even parseable text is not an authorized action when the provider reports truncation.
+      if (truncated) throw new Error('达到单次输出上限，工具 JSON 可能不完整');
       action = parseJson(raw);
       parsed = true;
       if (!action || typeof action.tool !== 'string' || (action.args !== undefined && (!action.args || typeof action.args !== 'object' || Array.isArray(action.args)))) {
@@ -466,10 +472,13 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
       invalidResponses += 1;
       await ctx.deps.appendStep(task, {
         tool: 'llm_parse_error', phase: 'format_retry', ok: false,
-        observation: `模型输出格式无效(${invalidResponses}/2)，返回 ${raw.length} 字符；协议校验：${parsed ? redact(error.message, 300) : '无法解析 JSON（请检查原始 content 是否被截断）'}；${invalidResponses === 2 ? '已停止，避免继续消耗' : '正在请求重新输出工具 JSON'}`,
+        observation: `${truncated ? '模型输出达到长度上限，已丢弃未执行' : '模型输出格式无效'}(${invalidResponses}/2)，返回 ${raw.length} 字符；协议校验：${truncated ? 'finish_reason=' + response.finishReason : parsed ? redact(error.message, 300) : '无法解析 JSON'}；${invalidResponses === 2 ? '已停止，避免继续消耗' : truncated ? '请求拆小文件后重新输出完整工具 JSON' : '正在请求重新输出工具 JSON'}`,
+        result: { finish_reason: typeof response === 'string' ? null : response.finishReason, truncated },
       });
-      if (invalidResponses >= 2) throw new AgentStopError('LLM_FORMAT_STALLED', '模型输出经一次修正仍不是合法工具调用');
-      history.push({ role: 'user', content: `上一条工具调用协议无效：${parsed ? error.message : '无法解析 JSON，请检查引号、括号与转义'}。请只返回一个合法 JSON 对象，包含 tool 和 args；字符串换行必须转义。` });
+      if (invalidResponses >= 2) throw new AgentStopError(truncated ? 'LLM_OUTPUT_TRUNCATED' : 'LLM_FORMAT_STALLED', truncated ? '模型输出经一次拆分提示后仍达到长度上限；未执行不完整操作，已有代码保留' : '模型输出经一次修正仍不是合法工具调用');
+      history.push({ role: 'user', content: truncated
+        ? '上一条达到单次输出 token 上限，已截断且未执行。不要原样重发大文件，也不要续写残缺 JSON。将实现拆成多个较小模块，这次只提交一个较小文件的完整内容；不要省略代码或使用占位内容。只返回完整的 tool/args JSON 对象。'
+        : `上一条工具调用协议无效：${parsed ? error.message : '无法解析 JSON，请检查引号、括号与转义'}。请只返回一个合法 JSON 对象，包含 tool 和 args；字符串换行必须转义。` });
       continue;
     }
     invalidResponses = 0;
@@ -542,7 +551,8 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
     }
 
     try {
-      observation += progress.recordResult(tool, args, ok);
+      observation += progress.recordResult(tool, args, ok, { codeChanged: tool === 'write_file' ? ctx.lastWriteChanged
+        : tool === 'apply_changes' && args.after !== 'build' ? ctx.lastMutationChanged : undefined });
     } catch (error) {
       await ctx.deps.appendStep(task, { tool, phase: 'stopped', observation: error.message });
       throw error;

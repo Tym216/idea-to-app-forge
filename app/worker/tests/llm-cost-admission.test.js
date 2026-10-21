@@ -259,3 +259,25 @@ test('equivalent decimal spelling keeps one execution policy; optional disabled 
   assert.equal(second.execution_reserved_before,first.execution_reserved_after);
  });
 });
+
+
+test('budget refusal explains Forge cumulative exposure in Chinese and retains exact hard ceiling',async()=>{
+ for(const currency of ['CNY','USD']) {
+  const settings=currency==='CNY'?{llmRequireCostBudget:true,llmCostCurrency:'CNY',llmCostInputPerMillion:'0.8',llmCostOutputPerMillion:'2.7',llmMaxTheoreticalCostPerExecution:'0.000001'}:{...profile,llmMaxTheoreticalCostUsdPerExecution:'0.000001'};
+  const p=resolveCostPolicy(settings);
+  await run(context(),async()=>{
+   assert.throws(()=>reserveRequestCost(p,body(),4096),error=>{
+    assert.equal(error.code,'LLM_COST_BUDGET_EXCEEDED');
+    assert.match(error.message,/Forge 本次执行的模型预算保护/);
+    assert.match(error.message,/不是供应商余额不足/);
+    assert.match(error.message,/该请求尚未发送/);
+    assert.match(error.message,/不是实际扣费/);
+    assert.ok(error.message.includes(currency+' 0.000001'));
+    assert.equal(error.budgetSetting,currency==='CNY'?'LLM_MAX_THEORETICAL_COST_PER_EXECUTION':'LLM_MAX_THEORETICAL_COST_USD_PER_EXECUTION');
+    assert.equal(error.costAdmission.admitted,false);
+    assert.equal(error.costAdmission.execution_reserved_after,0);
+    return true;
+   });
+  });
+ }
+});

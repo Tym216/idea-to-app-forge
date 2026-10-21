@@ -69,7 +69,7 @@ export function resolveCostPolicy(settings) {
   const ceiling = budget ? budget.numerator * SCALE / budget.denominator : null;
   if (required && ceiling <= 0n)
     throw fail('LLM_COST_CONFIG', 'Execution budget is below accounting precision');
-  return { required, currency, input, output, ceiling,
+  return { required, currency, input, output, ceiling, budgetSetting: selectedFields[2][1],
     inputRate: input ? numeric(input) : null, outputRate: output ? numeric(output) : null,
     budget: ceiling == null ? null : unitsToCost(ceiling),
     budgetUsd: currency === 'USD' && ceiling != null ? unitsToCost(ceiling) : null };
@@ -171,7 +171,13 @@ export function reserveRequestCost(policy, requestBody, trustedOutputCap, { task
     physical_attempt: attempt ?? null, execution_reserved_before: unitsToCost(before),
     execution_reserved_after: unitsToCost(ledger.reserved), admitted };
   if (!admitted) {
-    const error = fail('LLM_COST_BUDGET_EXCEEDED', 'The next provider request exceeds this execution theoretical cost budget');
+    // Keep the hard pre-HTTP ceiling: this is Forge exposure protection, not a provider balance error.
+    const amount = value => `${policy.currency} ${value}`;
+    const error = fail('LLM_COST_BUDGET_EXCEEDED',
+      `Forge 本次执行的模型预算保护已触发（不是供应商余额不足）：预算 ${amount(policy.budget)}，`
+      + `已预留理论费用 ${amount(unitsToCost(before))}，下一次请求理论上限 ${amount(estimate.diagnostics.request_theoretical_max)}。`
+      + '该请求尚未发送；以上为保守估算，不是实际扣费。');
+    error.budgetSetting = policy.budgetSetting;
     error.costAdmission = diagnostics;
     throw error;
   }

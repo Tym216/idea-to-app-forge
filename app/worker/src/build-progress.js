@@ -59,6 +59,8 @@ export class BuildProgress {
     this.maxFixRounds = maxFixRounds;
     this.maxRepeats = maxRepeats;
     this.fixRounds = fixRounds;
+    this.lastNoOpKey = null;
+    this.noOpCount = 0;
     this.lastFailureKey = null;
     this.repeatCount = 0;
     this.buildOk = false;
@@ -67,11 +69,19 @@ export class BuildProgress {
   }
 
   /** 记录一次工具结果,返回需要追加给模型的提示;持续重复时抛出 AGENT_STALLED。 */
-  recordResult(tool, args, ok) {
+  recordResult(tool, args, ok, { codeChanged } = {}) {
+    const noOp = ok && ['write_file','apply_changes'].includes(tool) && codeChanged === false;
+    if (noOp) {
+      const key = tool + ':' + JSON.stringify(tool === 'write_file' ? args.path : (args.changes || []).map(c => c.path).sort());
+      this.noOpCount = key === this.lastNoOpKey ? this.noOpCount + 1 : 1;
+      this.lastNoOpKey = key;
+    } else { this.lastNoOpKey = null; this.noOpCount = 0; }
     if (ok) {
       this.lastFailureKey = null;
       this.repeatCount = 0;
-      return '';
+      if (this.noOpCount >= this.maxRepeats)
+        throw new AgentStopError('AGENT_STALLED', `相同文件连续 ${this.noOpCount} 次写入没有源码变化，已停止空转；现有代码保留`);
+      return noOp ? '\n\n注意：目标内容已与当前文件一致，没有源码变化。不要重复写入；请继续其他必要实现，或执行 build。' : '';
     }
     const key = `${tool}:${JSON.stringify(args ?? {})}`;
     this.repeatCount = key === this.lastFailureKey ? this.repeatCount + 1 : 1;

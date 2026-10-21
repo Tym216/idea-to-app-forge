@@ -40,13 +40,14 @@ const passed={base:{blocking:[],warnings:[]},checks:[{id:'A1',status:'pass'}],sc
  * executeTask, runBuild, tool pipeline, common chat, memory and completion call stay real.
  * No source on disk is rewritten, and no SDK/DB/provider operation can escape the mocks.
  */
-async function fixture({pathological=false, verification=passed, budget='0.10',validationResume=false,planBusy=false}={}) {
+async function fixture({pathological=false, verification=passed, budget='0.10',validationResume=false,planBusy=false,truncation=null,outputCap=4096,noOpLoop=false,logicStatus=null,httpOnly=false,bootstrapFailure=false,repairOutcome=null,persistedRepair=false}={}) {
  const prior={...config},oldFetch=globalThis.fetch,oldLogger={...logger};
- Object.assign(config,profile,{llmMaxTheoreticalCostUsdPerExecution:budget});
- const logs=[],files=new Map(),operations=[],events=[];
+ Object.assign(config,profile,{llmMaxTheoreticalCostUsdPerExecution:budget,llmMaxOutputTokensBuild:outputCap,browserVerificationEnabled:!httpOnly});
+ const logs=[],files=new Map(),operations=[],events=[],changesets=[],modelRequests=[];
  const task={id:randomUUID(),project_id:'offline-project',user_id:'offline-user',execution_id:randomUUID(),
   mode:'build',operation:'agent',kind:'new',prompt:'Build the approved plan',plan_id:'offline-plan',plan_version:1,
   tool_steps:0,fix_rounds:0,steps:[]};
+ if(persistedRepair)task.steps.push({tool:'verification_repair',event:'started'});
  const project={id:task.project_id,user_id:task.user_id,name:'Records',description:'Customer records',
   sandbox_id:null,checkpoint_id:null};
  const plan={id:task.plan_id,project_id:task.project_id,version:1,kind:'plan',status:'approved',
@@ -59,7 +60,7 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   files.set('src/App.tsx','export default function App(){return <main>records</main>}');
  }
  if(planBusy)task.mode='plan';
- let workspace,posts=0,decisions=0,memories=0,checkpoints=0,planWrites=0;
+ let workspace,posts=0,decisions=0,memories=0,checkpoints=0,planWrites=0,logicRuns=0;
  const sb={
   workdir:'/offline',
   async ensure(){operations.push('ensure');return {sandboxId:'offline-sandbox',alive:false};},
@@ -71,6 +72,9 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
    let stdout='';
    if(command.startsWith('node -e '))stdout=JSON.stringify({nodeVersion:'offline',platform:'linux',arch:'x64',environmentHash:'fixture'});
    if(command.startsWith('curl '))stdout='200';
+   if(command.includes('FORGE_HTTP_CHECK:'))stdout='FORGE_HTTP_CHECK:'+JSON.stringify({blocking:[],httpStatus:200,entryStatus:200});
+   const effectiveLogic=command.includes('__FORGE_LOGIC__')&&repairOutcome==='passed'&&logicRuns++>0?'passed':logicStatus;
+   if(command.includes('__FORGE_LOGIC__'))stdout='__FORGE_LOGIC__'+JSON.stringify({status:effectiveLogic,tests:1,passed:effectiveLogic==='passed'?1:0,failed:effectiveLogic==='failed'?1:0,skipped:0,details:effectiveLogic==='failed'?'ERR_ASSERTION: 2 boxes != 5 goals':'test environment failure'});
    if(command==='npm --version')stdout='10.0.0';
    if(command.startsWith('printf %s'))stdout='/offline';
    if(command.includes('echo READY'))stdout='READY';
@@ -100,7 +104,9 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   async runtime(kind,fn){operations.push('runtime:'+kind);return fn();}
   valid(kind,basis){const e=this.state[kind];return !!e&&e.revision===this.state.revision&&e.code_hash===this.manifest.code_hash&&e.basis===basis;}
   async evidence(kind,basis,status,result){this.state[kind]={basis,status,result,revision:this.state.revision,code_hash:this.manifest.code_hash};events.push('evidence:'+kind+':'+status);}
-  async apply(changes,{beforeWrite=async()=>{},onWriteSuccess=async()=>{},invalidate=()=>{}}={}){
+  async apply(changes,{beforeWrite=async()=>{},onWriteSuccess=async()=>{},invalidate=()=>{},origin}={}){
+    changesets.push({origin,paths:changes.map(c=>c.path)});
+    if(bootstrapFailure&&origin==='scaffold')throw Object.assign(new Error('bootstrap uncertain'),{code:'WORKSPACE_UNCERTAIN'});
    let changed=false;
    for(const [i,c] of changes.entries()){
     await beforeWrite(i,c.path);const different=files.get(c.path)!==c.content;
@@ -122,6 +128,7 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   admin:{rpc:async()=>{throw new Error('unexpected RPC');}},
   getProject:async()=>project,getPlan:async()=>plan,getLatestPlanVersion:async()=>1,
   listFeedback:async()=>[],ensureLease:async()=>{},
+  inspectRuntimeWriter:async()=>{throw new Error('unexpected runtime recovery');},
   updateTask:async()=>{},updateProject:async()=>{},
   appendStep:async(t,step)=>t.steps.push(step),
   addMessage:async()=>{},savePlan:async()=>{planWrites++;throw new Error('unexpected Plan generation');},
@@ -152,7 +159,7 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   /from '(\.[^']+)'/g,(_match,path)=>'from '+JSON.stringify(fakeModules[path]||new URL(path,new URL('../src/agent.js',import.meta.url)).href));
  for(const level of ['info','warn','error'])logger[level]=(event,data)=>logs.push({event,...data});
  globalThis.fetch=async(_url,request)=>{
-  const b=JSON.parse(request.body);assert.equal(b.reasoning.effort,'none');
+  const b=JSON.parse(request.body);modelRequests.push(b);assert.equal(b.reasoning.effort,'none');
   assert.equal(Object.hasOwn(b,'temperature'),false);assert.equal(b.provider.require_parameters,true);
   const last=logs.findLast(l=>l.event==='llm.cost_admission');
   assert.ok(last.admitted);assert.ok(last.execution_reserved_after<=Number(budget));posts++;
@@ -160,12 +167,18 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   let output;
   if(b.max_tokens===1024){memories++;output={upsert:[],remove:[]};}
   else{
-   assert.equal(b.max_tokens,4096);decisions++;
-   output=pathological?{tool:'list_files',args:{}}:decisions===1?{
+   assert.equal(b.max_tokens,outputCap);decisions++;
+   output=pathological?{tool:'list_files',args:{}}:decisions===(truncation==='once'?2:1)?{
     tool:'apply_changes',args:{changes:[{operation:'write',path:'src/App.tsx',content:'export default function App(){return <main>records</main>}'}],after:'build'},
    }:{tool:'finish',args:{summary:'Customer records ready'}};
   }
-  return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}],
+  if(repairOutcome&&decisions===2&&b.max_tokens!==1024)output={tool:'apply_changes',args:{changes:[{operation:'write',path:'src/App.tsx',content:'export default function App(){return <main>records corrected</main>}'}],after:'build'}};
+  if(repairOutcome==='idle'&&decisions>=2&&b.max_tokens!==1024)output={tool:'list_files',args:{}};
+  if(noOpLoop&&b.max_tokens!==1024)output={tool:'write_file',args:{path:'src/levels.ts',content:'export const levels = [];'}};
+  if(logicStatus&&output?.tool==='apply_changes')output.args.changes.push({operation:'write',path:'src/rules.test.mjs',content:"import {test} from 'node:test'; test('rules',()=>{});"},{operation:'write',path:'forge.checks.json',content:JSON.stringify({version:1,tests:['src/rules.test.mjs']})});
+  const cut=truncation&&(truncation==='always'||decisions===1)&&b.max_tokens!==1024;
+  if(cut)output={tool:'write_file',args:{path:'src/never.ts',content:'not authorized'}};
+  return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:cut?'length':'stop'}],
    usage:{prompt_tokens:1,completion_tokens:1,cost:0.000001}}));
  };
  try {
@@ -173,7 +186,7 @@ async function fixture({pathological=false, verification=passed, budget='0.10',v
   const control={taskId:task.id,executionId:task.execution_id,signal:new AbortController().signal,checkLease:async()=>{}};
   let result,error;
   try{result=await withExecutionControl(control,()=>executeTask(task));}catch(e){error=e;}
-  return {result,error,posts,decisions,memories,checkpoints,planWrites,logs,events,operations,task,workspace};
+  return {result,error,posts,decisions,memories,checkpoints,planWrites,logs,events,operations,task,workspace,changesets,modelRequests};
  }finally{Object.assign(config,prior);globalThis.fetch=oldFetch;Object.assign(logger,oldLogger);delete globalThis[binding];}
 }
 
@@ -234,4 +247,30 @@ test('real Plan 429: one bounded physical retry, per-request admission, no Works
  assert.equal(f.error?.code,'LLM_PROVIDER_BUSY');assert.equal(f.posts,2);
  assert.equal(f.planWrites,0);assert.equal(f.workspace,undefined);assert.equal(f.checkpoints,0);assert.equal(f.memories,0);
  assert.equal(f.logs.filter(l=>l.event==='llm.cost_admission'&&l.admitted).length,2);
+});
+
+
+test('real provider normalization retains length reason; two charged truncated replies never mutate or checkpoint',async()=>{
+ const f=await fixture({truncation:'always'});
+ assert.equal(f.error?.code,'LLM_OUTPUT_TRUNCATED');assert.equal(f.posts,2);assert.equal(f.decisions,2);
+ assert.equal(f.checkpoints,0);assert.equal(f.memories,0);
+ assert.ok(!f.workspace.manifest.files.some(x=>x.path==='src/never.ts'));
+ assert.equal(f.logs.filter(x=>x.event==='llm.cost_admission'&&x.admitted).length,2);
+});
+test('8192 output cap remains subject to admission while smaller corrected action reaches normal checkpoint',async()=>{
+ const f=await fixture({truncation:'once',outputCap:8192});
+ assert.equal(f.error,undefined);assert.equal(f.checkpoints,1);assert.equal(f.decisions,3);
+ assert.ok(!f.workspace.manifest.files.some(x=>x.path==='src/never.ts'));
+ const admitted=f.logs.filter(x=>x.event==='llm.cost_admission'&&x.admitted);
+ assert.ok(admitted.every(x=>x.execution_reserved_after<=0.1));
+ assert.ok(admitted.filter(x=>x.purpose==='build_decision').every(x=>x.output_upper_bound_tokens===8192));
+});
+
+
+test('real Agent loop stops confirmed no-op write churn after three warnings without spending all tool steps',async()=>{
+ const f=await fixture({noOpLoop:true});
+ assert.equal(f.error?.code,'AGENT_STALLED');assert.match(f.error.message,/没有源码变化/);
+ assert.equal(f.decisions,4);assert.equal(f.checkpoints,0);assert.equal(f.memories,0);
+ assert.ok(f.workspace.manifest.files.some(x=>x.path==='src/levels.ts'&&x.content==='export const levels = [];'));
+ assert.equal(f.task.steps.filter(x=>x.tool==='write_file'&&x.event==='finished'&&x.code_changed===true).length,1);
 });

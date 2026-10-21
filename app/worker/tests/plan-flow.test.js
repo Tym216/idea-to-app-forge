@@ -139,3 +139,15 @@ test('出现新计划后不允许恢复绑定旧验收的任务', async () => {
   const deps = { ...recorder(), getPlan: async () => ({ id: 'old', version: 2, kind: 'plan', status: 'approved', content: PLAN }), getLatestPlanVersion: async () => 3 };
   await assert.rejects(resolveBuildBasis({ id: 't', project_id: 'p', plan_id: 'old', plan_version: 2 }, 'ctx', deps), (e) => e.code === 'PLAN_VERSION_STALE');
 });
+
+
+test('budget failure summary preserves cost details and points to the effective setting without automatic retry',()=>{
+ const message='Forge 本次执行的模型预算保护已触发（不是供应商余额不足）：预算 CNY 0.5，已预留理论费用 CNY 0.4713674，下一次请求理论上限 CNY 0.0408118。该请求尚未发送；以上为保守估算，不是实际扣费。';
+ for(const setting of ['LLM_MAX_THEORETICAL_COST_PER_EXECUTION','LLM_MAX_THEORETICAL_COST_USD_PER_EXECUTION']) {
+  const result=summarizeError(Object.assign(new Error(message),{code:'LLM_COST_BUDGET_EXCEEDED',budgetSetting:setting}),{mode:'build'});
+  assert.equal(result.reason,message);
+  assert.ok(result.next.includes(setting));
+  assert.match(result.next,/重启 Worker/);
+  assert.match(result.next,/不会自动加预算或重试/);
+ }
+});
