@@ -222,10 +222,10 @@ test('short real executeTask Build+Memory share reservations and reach normal ev
   checkpoint_count:f.checkpoints,steps:f.task.tool_steps}));
 });
 
-test('actual terminal blocker/tool_error path cannot checkpoint or spend Memory budget',async()=>{
+test('bounded blocker repair and tool_error cannot checkpoint or spend Memory budget',async()=>{
  for(const verification of [{toolError:'offline verifier failure'},{...passed,base:{blocking:['runtime crash'],warnings:[]}}]){
-  const f=await fixture({verification});assert.ok(['VERIFY_TOOL_ERROR','VERIFY_FAILED'].includes(f.error?.code));
-  assert.equal(f.checkpoints,0);assert.equal(f.memories,0);assert.equal(f.posts,1);
+  const f=await fixture({verification});assert.ok(['VERIFY_TOOL_ERROR','AGENT_STALLED'].includes(f.error?.code));
+  assert.equal(f.checkpoints,0);assert.equal(f.memories,0);assert.equal(f.posts,verification.toolError?1:4);
  }
 });
 
@@ -277,7 +277,7 @@ test('real Agent loop stops confirmed no-op write churn after three warnings wit
 
 
 test('supplemental core assertion failure blocks checkpoint without rewriting the successful build fact',async()=>{
- const f=await fixture({logicStatus:'failed'});assert.equal(f.error?.code,'VERIFY_FAILED');assert.equal(f.checkpoints,0);assert.equal(f.memories,0);
+ const f=await fixture({logicStatus:'failed'});assert.equal(f.error?.code,'AGENT_STALLED');assert.equal(f.checkpoints,0);assert.equal(f.memories,0);
  assert.equal(f.workspace.state.build.status,'passed');assert.equal(f.workspace.state.verify.status,'blocker');assert.equal(f.workspace.state.verify.result.logicChecks.status,'failed');
  assert.ok(f.task.steps.some(s=>s.tool==='logic_check'&&s.ok===false));
 });
@@ -312,4 +312,36 @@ test('blocked logic evidence reaches persisted report and resume prompt without 
  assert.equal(report.logicChecks.status,'failed');assert.equal(report.logicChecks.failed,1);
  assert.match(f.error.message,/ERR_ASSERTION/);assert.equal(f.error.verification.logicStatus,'failed');
  assert.equal(f.checkpoints,0);assert.equal(f.memories,0);assert.equal(report.items[0].status,'inconclusive');
+});
+
+
+test('one evidence-driven repair updates source then validates same fixed basis and checkpoints without another finish turn',async()=>{
+ const f=await fixture({logicStatus:'failed',httpOnly:true,repairOutcome:'passed'});assert.ifError(f.error);
+ assert.equal(f.decisions,2);assert.equal(f.memories,0);assert.equal(f.checkpoints,1);
+ assert.equal(f.task.steps.filter(s=>s.tool==='verification_repair'&&s.event==='started').length,1);
+ assert.equal(f.task.steps.filter(s=>s.tool==='verify_attempt').length,2);
+ const reports=f.task.steps.filter(s=>s.tool==='verify_report');assert.equal(reports[0].result.kind,'blocker');assert.equal(reports[1].result.kind,'inconclusive');
+ assert.equal(f.workspace.state.verify.result.logicChecks.status,'passed');
+ const requests=f.modelRequests.filter(b=>b.max_tokens!==1024);
+ assert.ok(requests[1].messages.some(m=>m.content.includes('ERR_ASSERTION')));
+ assert.deepEqual(f.workspace.state.verify.result.items.map(i=>i.id),['A1']);
+ const timing=f.logs.filter(l=>l.event==='model.request_started');assert.ok(timing[1].timeout_ms<=90000);
+});
+test('still-blocked second check stops rather than starting another episode, preserves successful build and no version',async()=>{
+ const f=await fixture({logicStatus:'failed',httpOnly:true,repairOutcome:'failed'});
+ assert.equal(f.error?.code,'VERIFY_FAILED');assert.equal(f.decisions,2);assert.equal(f.memories,0);assert.equal(f.checkpoints,0);
+ assert.equal(f.task.steps.filter(s=>s.tool==='verification_repair'&&s.event==='started').length,1);
+ assert.equal(f.task.steps.filter(s=>s.tool==='verify_attempt').length,2);
+ assert.equal(f.workspace.state.build.status,'passed');assert.equal(f.workspace.state.verify.status,'blocker');
+});
+test('persisted repair admission survives resume; no automatic extra LLM after another blocker',async()=>{
+ const f=await fixture({logicStatus:'failed',httpOnly:true,persistedRepair:true});
+ assert.equal(f.error?.code,'VERIFY_FAILED');assert.equal(f.decisions,1);assert.equal(f.checkpoints,0);
+});
+
+test('real Agent repair has at most four additional model turns even without repeated failures',async()=>{
+ const f=await fixture({logicStatus:'failed',httpOnly:true,repairOutcome:'idle'});
+ assert.equal(f.error?.code,'VERIFY_REPAIR_LIMIT');assert.equal(f.decisions,5);assert.equal(f.memories,0);assert.equal(f.checkpoints,0);
+ assert.equal(f.task.steps.filter(s=>s.tool==='verify_attempt').length,1);
+ assert.equal(f.task.steps.filter(s=>s.tool==='verification_repair'&&s.event==='started').length,1);
 });

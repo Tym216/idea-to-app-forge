@@ -203,7 +203,7 @@ test('Build 提交弱断言被拒绝;验收只执行计划绑定的检查', asyn
   assert.match(result.summary, /已验证.*A1/);
 });
 
-test('浏览器验收第一次失败就停止，保留预览，不自动修复或再调用模型', async () => {
+test('无 confirmed workspace 的旧测试路径不能自动获得修复写入资格，保留预览并停止', async () => {
   const task = newTask();
   const deps = fakeDeps([{ tool: 'build', args: {} }, { tool: 'start_dev', args: {} }, verifyAction]);
   let called = 0;

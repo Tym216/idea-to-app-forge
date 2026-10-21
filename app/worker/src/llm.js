@@ -80,8 +80,11 @@ export async function chat(messages, options = {}) {
   return (await chatResponse(messages, options)).text;
 }
 
-export async function chatResponse(messages, { temperature = 0.2, json = false, taskId, purpose = 'unspecified', contextParts, reasoningMode = 'off', reasoningPolicy = 'best_effort', interactionMode = 'structured_text', captureFactory = localRequestCapture } = {}) {
+export async function chatResponse(messages, { temperature = 0.2, json = false, taskId, purpose = 'unspecified', contextParts, reasoningMode = 'off', reasoningPolicy = 'best_effort', interactionMode = 'structured_text', captureFactory = localRequestCapture, timeoutMs } = {}) {
   assertExecutionActive();
+  // A caller may shorten a request deadline, never enlarge the configured allowance.
+  const requestTimeoutMs = Math.max(1, Math.floor(Math.min(config.llmTimeoutMs ?? LLM_REQUEST_TIMEOUT_MS,
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : Infinity)));
   const costPolicy = resolveCostPolicy(config);
   assertCostExecution(costPolicy, taskId);
   const outputBudget = resolveOutputCap(config, purpose);
@@ -152,7 +155,7 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
       let usageCostEstimate;
       let providerReportedCostUsd = null;
       const diagnostic = requestDiagnostics({ requestId: request.requestId, logicalCallId, attempt,
-        provider: provider.name, model: provider.model, purpose, timeoutMs: config.llmTimeoutMs ?? LLM_REQUEST_TIMEOUT_MS,
+        provider: provider.name, model: provider.model, purpose, timeoutMs: requestTimeoutMs,
         messagesCount: messages.length, contextChars, requestBody, capability,
         requestedOptions: nativeOptions, body });
       const capture = captureFactory({ enabled: config.llmDebugCaptureRequest === true, requestId: request.requestId });
@@ -279,7 +282,7 @@ export async function chatResponse(messages, { temperature = 0.2, json = false, 
     }
   ), {
     signal: currentExecution()?.signal,
-    timeoutMs: config.llmTimeoutMs ?? LLM_REQUEST_TIMEOUT_MS,
+    timeoutMs: requestTimeoutMs,
     beforeAttempt: async (attempt) => { if (attempt > 1 || costPolicy.required) await beforeModelCall(); else assertExecutionActive(); },
     onRetry: async (details) => {
       logger.warn('llm.retry_scheduled', { taskId, logical_call_id: logicalCallId, provider: config.llmProvider, model: provider.model, ...details });

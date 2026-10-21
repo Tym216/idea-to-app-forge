@@ -1,3 +1,4 @@
+import { canRepairVerification, VerificationRepair, verificationRepairPrompt, VERIFY_REPAIR_LIMITS } from './verification-repair.js';
 import {buildBootstrapChanges} from './build-bootstrap.js';
 import {LOGIC_GUIDANCE,logicEvidenceValid,runLogicChecks,mergeLogicResult} from './logic-checks.js';
 import { buildActionContext } from './action-context.js';
@@ -145,6 +146,7 @@ async function buildContext(task, project, files, memories) {
 async function runTool(ctx, tool, args) {
   const { task, sandbox, sandboxId, progress } = ctx;
   if (ctx.workspace) await ctx.workspace.assertCurrent(ctx.contextRevision);
+  ctx.repair?.check(); // Recheck after asynchronous lease/revision reads, before source effects.
   switch (tool) {
     case 'list_files': {
       const paths = ctx.workspace ? ctx.workspace.manifest.files.map((f) => f.path) : await sandbox.listFiles(sandboxId, sandbox.workdir);
@@ -371,7 +373,7 @@ async function runTool(ctx, tool, args) {
       if (!ctx.workspace) requireNewRevisionForVerification(task);
       const attempt = verificationAttempts(task.steps) + 1;
       await ctx.deps.appendStep(task, { tool: 'verify_attempt', phase: 'verify', event: 'started',
-        observation: httpOnly?'快速检查：构建 + HTTP；浏览器渲染与功能验收已暂时关闭':healthOnly?'快速编辑检查：HTTP、渲染与 runtime；不运行功能交互验收':`第 ${attempt}/${MAX_VERIFY_ATTEMPTS} 次浏览器验收；失败后等待用户决定，不自动修复`,result:{mode:httpOnly?'http':healthOnly?'health':'full'} });
+        observation: httpOnly?'快速检查：构建 + HTTP；浏览器渲染与功能验收已暂时关闭':healthOnly?'快速编辑检查：HTTP、渲染与 runtime；不运行功能交互验收':`第 ${attempt}/${MAX_VERIFY_ATTEMPTS} 次浏览器验收；明确阻断问题最多尝试一轮限额修正`,result:{mode:httpOnly?'http':healthOnly?'health':'full'} });
       const verify = () => httpOnly ? (ctx.deps.verifyHttpApp || runHttpVerification)({sandbox,sandboxId,acceptance:ctx.acceptance})
         : (ctx.deps.verifyApp || runVerification)({ sandbox, sandboxId, checks: validated.checks });
       const validate = async () => {
@@ -443,13 +445,17 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
   }
 
   let invalidResponses = 0;
+  let repair = null;
   while (task.tool_steps < config.maxToolSteps) {
     assertExecutionActive();
     if (task.aborted) throw new AgentStopError('ABORTED', task.aborted);
     if (ctx.workspace) await ctx.workspace.assertCurrent(ctx.contextRevision);
     task.current_tool = null;
-    await ctx.deps.updateTask(task.id, { phase: 'deciding' });
+    repair?.check();
+    await ctx.deps.updateTask(task.id, { phase: repair ? 'quick_repair' : 'deciding' });
+    const repairTimeoutMs = repair?.nextCall();
     const response = await (ctx.deps.chatResponse || ctx.deps.chat)(history, { temperature: 0.1, json: true, reasoningMode: 'off', interactionMode: 'json_action', taskId: task.id,
+      ...(repairTimeoutMs ? { timeoutMs: repairTimeoutMs } : {}),
       purpose: 'build_decision', contextParts: {
         system: { plan_and_acceptance: options.planChars || 0, instructions: history[0].content.length - (options.planChars || 0) },
         user: task.contextParts,
@@ -499,6 +505,7 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
     task.tool_steps += 1;
     history.push({ role: 'assistant', content: JSON.stringify(action) });
     const { tool, args = {} } = action;
+    repair?.beforeTool(tool);
     recordToolCall();
 
     if (tool === 'finish') {
@@ -555,6 +562,16 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
         await ctx.deps.appendStep(task, { tool, phase: parentSucceeded ? tool : 'stopped', event: 'finished', ok: parentSucceeded,
           ms: Math.max(0, performance.now() - started), observation: parentSucceeded ? '构建成功；后续校验停止：' + error.message : error.message,
           ...(error.operations ? { result: { status: error.code === 'CHANGE_UNCERTAIN' ? 'uncertain' : 'partial', operations: error.operations } } : {}) });
+        if (!repair && canRepairVerification(task, error, ctx.workspace)) {
+          // Persist admission before any extra model request; fixed acceptance and cost budget stay unchanged.
+          await ctx.deps.appendStep(task, { tool: 'verification_repair', phase: 'quick_repair', event: 'started',
+            observation: '发现待完善项，正在进行一次有额度限制的快速修正。',
+            result: { ...VERIFY_REPAIR_LIMITS, revision: ctx.contextRevision } });
+          repair = new VerificationRepair();
+          ctx.repair = repair;
+          history.push({ role: 'user', content: verificationRepairPrompt(error) });
+          continue;
+        }
         throw error;
       }
       observation = `工具执行失败: ${String(error).slice(0, 2000)}`;
@@ -589,10 +606,12 @@ export async function runBuild(task, project, sandbox, sandboxId, context, deps 
       ok, ms: Math.max(0, performance.now() - started), observation: observation.slice(0, 1500),
     });
     history.push({ role: 'user', content: `观察结果:\n${observation.slice(0, 6000)}` });
-    if (ctx.verificationResult && ['success_with_warnings', 'inconclusive'].includes(ctx.verificationResult.kind)) {
-      const summary = composeSummary('已生成可预览版本，部分验收尚未通过或证据不足。', ctx.verificationResult);
+    if (ctx.verificationResult && (['success_with_warnings', 'inconclusive'].includes(ctx.verificationResult.kind) || (repair && ctx.verificationResult.kind === 'passed'))) {
+      if (repair) await ctx.deps.appendStep(task, { tool: 'verification_repair', phase: 'verify', event: 'finished', ok: true,
+        observation: '快速修正完成；按固定检查结果继续保存版本。', result: { modelCalls: repair.calls, kind: ctx.verificationResult.kind } });
+      const summary = composeSummary(ctx.verificationResult.kind === 'passed' ? '修正已完成，固定检查通过。' : '已生成可预览版本，部分检查仍有待确认项。', ctx.verificationResult);
       await ctx.deps.appendStep(task, { tool: 'finish', phase: 'finishing', observation: summary });
-      return { summary, previewUrl: ctx.previewUrl, verificationKind: ctx.verificationResult.kind };
+      return { summary, previewUrl: ctx.previewUrl, verificationKind: ctx.verificationResult.kind, verificationRepaired: !!repair };
     }
 
     if (history.length > 24) history.splice(2, history.length - 20);
@@ -614,6 +633,7 @@ function consumeStep(ctx) {
 }
 
 async function executeOperation(ctx, tool, args, automatic) {
+  ctx.repair?.beforeTool(tool);
   assertExecutionActive();
   await ctx.deps.checkLease();
   if (automatic) consumeStep(ctx);
@@ -873,12 +893,14 @@ export async function executeTask(task) {
   const mode=verificationMode();
   const verifyBasis = currentVerifyBasis(basis.acceptance,buildBasis,mode);
   await updateTask(task.id, { phase: 'react' });
-  const { summary, previewUrl, verificationKind } = await runBuild(
+  const { summary, previewUrl, verificationKind, verificationRepaired } = await runBuild(
     task, project, sandbox, sandboxId, currentBuildContext, deps, `${basis.prompt}\n\n${preserveDesign ? ITERATION_DESIGN_PROMPT : renderDesignPrompt(design)}`, basis.acceptance,
     { planChars: basis.prompt.length, runtimePolicy: webValidationPolicy(basis.plan, config.actionFusionEnabled), workspace, buildBasis, verifyBasis, verificationMode:mode }
   );
 
-  await extractMemories({ userId: task.user_id, projectId: task.project_id, userPrompt: task.prompt, summary, taskId: task.id });
+  // Do not add an unbounded auxiliary model call after the short repair has succeeded.
+  if (!verificationRepaired) await extractMemories({ userId: task.user_id, projectId: task.project_id, userPrompt: task.prompt, summary, taskId: task.id });
+  else await appendStep(task, {tool:'memory',phase:'finishing',observation:'快速完善后跳过辅助记忆抽取，直接保存已检查版本。'});
   await workspace.runtime('checkpoint', async () => ({}));
   const finalBasis = buildFingerprint(await buildRuntimeBasis(sandbox, sandboxId));
   if (finalBasis !== buildBasis) throw sourceError('WORKSPACE_EVIDENCE_STALE', '构建环境已变更；不能沿用旧证据完成');

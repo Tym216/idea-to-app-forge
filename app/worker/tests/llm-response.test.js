@@ -43,3 +43,23 @@ test('空正文仍拒绝且不重试,但 Langfuse 保留 finish_reason 和真实
     __setTelemetryForTest();
   }
 });
+
+
+test('repair caller can only shorten provider deadline; timeout aborts real request signal with no blind retry', async () => {
+  const prior={...config},oldFetch=globalThis.fetch;
+  try {
+    Object.assign(config,{llmProvider:'openrouter',openrouterApiKey:'offline',openrouterModel:'offline',llmTimeoutMs:30});
+    for(const timeoutMs of [10,1000]){
+      let requests=0;
+      globalThis.fetch=async(_url,{signal})=>{
+        requests++;
+        return new Promise((resolve,reject)=>{
+          const hold=setTimeout(()=>resolve(new Response('{}')),1000);
+          signal.addEventListener('abort',()=>{clearTimeout(hold);reject(signal.reason);},{once:true});
+        });
+      };
+      await assert.rejects(()=>chat([],{timeoutMs}),{code:'LLM_TIMEOUT'});
+      assert.equal(requests,1);
+    }
+  }finally{Object.assign(config,prior);globalThis.fetch=oldFetch;}
+});
